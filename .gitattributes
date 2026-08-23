@@ -1,0 +1,2 @@
+web/models/whisper-tiny/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+web/vendor/transformers/*.wasm filter=lfs diff=lfs merge=lfs -text

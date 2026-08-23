@@ -1,0 +1,28 @@
+[
+  {
+    "id": "user_xiaoyu",
+    "display_name": "海涛",
+    "preferred_message_app": "模拟消息应用",
+    "frequent_contacts": ["contact_zhangsan", "contact_mama"],
+    "music_preferences": {
+      "focus": { "lofi": 4, "light_music": 2, "pure_music": 1, "classical": 1, "pop": -1 },
+      "driving": { "rock": 3, "electronic": 2, "pop": 1 },
+      "entertainment": { "pop": 3, "jazz": 2, "electronic": 1 }
+    },
+    "schedule_reminder_minutes": 50,
+    "response_style": "简洁"
+  },
+  {
+    "id": "user_chenmo",
+    "display_name": "泽平",
+    "preferred_message_app": "模拟消息应用",
+    "frequent_contacts": ["contact_mama", "contact_lisi"],
+    "music_preferences": {
+      "focus": { "lofi": 0, "light_music": 1, "pure_music": 5, "classical": 3, "pop": -2 },
+      "driving": { "rock": 1, "electronic": 4, "pop": 2 },
+      "entertainment": { "jazz": 4, "pop": 2, "rock": 1 }
+    },
+    "schedule_reminder_minutes": 30,
+    "response_style": "详细"
+  }
+]

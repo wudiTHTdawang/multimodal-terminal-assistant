@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多模态个性化终端助手</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">Windows 本地演示原型</p>
+        <h1>多模态个性化终端助手</h1>
+      </div>
+      <label class="profile-select">演示用户 <select id="profile"></select></label>
+    </header>
+
+    <main>
+      <aside class="sidebar">
+        <button class="nav-button active" data-page="message">消息发送</button>
+        <button class="nav-button" data-page="music">音乐</button>
+        <button class="nav-button" data-page="memo">日程安排</button>
+        <p class="note">当前为按钮模拟输入。后续将把按钮事件替换为语音识别、视线落点和点头确认模块。</p>
+      </aside>
+
+      <section class="page active" id="message-page">
+        <p class="section-label">场景 A · 语音 + 视线 + 联系人页面</p>
+        <h2>给他发消息</h2>
+        <p>先点击模拟“注视”的联系人，再输入消息内容，模拟系统根据视线和语音中的“他”完成对象消歧。</p>
+        <div class="card-grid" id="contacts"></div>
+        <label>消息内容<textarea id="message-content" placeholder="例如：晚点开会"></textarea></label>
+        <button class="primary" id="prepare-message">生成发送确认</button>
+        <div class="result" id="message-result"></div>
+      </section>
+
+      <section class="page" id="music-page">
+        <p class="section-label">场景 B · 明确场景模式 + 本地音乐偏好</p>
+        <h2>音乐</h2>
+        <p>选择专注、开车或娱乐模式后，再通过注视音乐卡片和语音“播放这个”选择音乐。每次播放、喜欢或跳过都会只在当前模式下记录偏好。</p>
+        <div class="mode-grid" id="modes"></div>
+        <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
+        <div class="mode-decision" id="mode-decision"></div>
+        <div class="card-grid muted" id="genres"></div>
+        <div class="result" id="music-result"></div>
+      </section>
+
+      <section class="page" id="memo-page">
+        <p class="section-label">场景 C · 用户授权的本地备忘录</p>
+        <h2>日程安排</h2>
+        <p>点击下方按钮后可一次选择多个 `.txt`、`.md` 或 `.json` 备忘录。新选择的文件集会替换旧授权列表，避免遗留文件混入结果。</p>
+        <input id="memo-file" type="file" accept=".txt,.md,.json" multiple hidden />
+        <button class="secondary" id="choose-memo">选择并授权多个备忘录文件</button>
+        <p class="authorization-status" id="authorization-status">尚未选择授权备忘录文件。</p>
+        <button class="primary" id="query-schedule">查看所有已授权日程</button>
+        <div class="result" id="memo-result"></div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
