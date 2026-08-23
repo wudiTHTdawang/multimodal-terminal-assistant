@@ -387,6 +387,31 @@ class AssistantHandler(SimpleHTTPRequestHandler):
         if action == "decline_reminder":
             return {"message": "已取消本次提醒；不会因此修改长期偏好。"}
 
+        if action == "record_event":
+            event = payload.get("event", {})
+            
+            # 1. 验证字段
+            required_fields = ["modality", "timestamp_ms", "confidence", "payload"]
+            for field in required_fields:
+                if field not in event:
+                    raise ValueError(f"缺少必填字段: {field}")
+            
+            # 2. 验证置信度范围
+            if not 0.0 <= event["confidence"] <= 1.0:
+                raise ValueError("置信度必须在 0~1 之间")
+            
+            # 3. 存入事件窗口（只保留最近10秒）
+            state = load_state()
+            event_window = state.get("event_window", [])
+            event_window.append(event)
+            # 删除10秒前的旧事件
+            cutoff = event["timestamp_ms"] - 10000
+            event_window = [e for e in event_window if e["timestamp_ms"] > cutoff]
+            state["event_window"] = event_window
+            save_state(state)
+            
+            return {"message": f"已记录 {event['modality']} 事件", "window_size": len(event_window)}
+        
         raise ValueError("不支持的操作。")
 
 
