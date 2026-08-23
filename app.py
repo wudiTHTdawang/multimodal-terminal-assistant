@@ -163,6 +163,11 @@ class AssistantHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def end_headers(self):
+        # 演示开发阶段始终加载最新页面脚本，避免浏览器缓存旧操作名。
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        super().end_headers()
+
     def send_json(self, payload, status=HTTPStatus.OK):
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
