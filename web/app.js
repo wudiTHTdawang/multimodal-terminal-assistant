@@ -3,6 +3,7 @@ let pendingMessage;
 let currentTrack;
 let activeMode;
 let switchArmed = false;
+let cameraStream;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -22,6 +23,65 @@ function toast(message) {
   node.textContent = message;
   node.classList.add('show');
   window.setTimeout(() => node.classList.remove('show'), 2400);
+}
+
+function setCameraStatus(message, status = 'idle') {
+  const node = $('#camera-status');
+  node.textContent = message;
+  node.dataset.status = status;
+}
+
+function updateCameraControls(active) {
+  $('#start-camera').disabled = active;
+  $('#stop-camera').disabled = !active;
+  $('#camera-placeholder').hidden = active;
+}
+
+function cameraErrorMessage(error) {
+  if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
+    return '未获得摄像头权限。请在浏览器地址栏的权限设置中允许摄像头后重试。';
+  }
+  if (error.name === 'NotFoundError') return '未检测到可用摄像头。请检查设备是否已连接。';
+  if (error.name === 'NotReadableError') return '摄像头正被其他应用占用。请关闭会议软件或相机应用后重试。';
+  return `无法开启摄像头：${error.message || '发生未知错误。'}`;
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setCameraStatus('当前浏览器不支持摄像头访问。请使用最新版 Chrome、Edge 或 Firefox。', 'error');
+    return;
+  }
+  try {
+    setCameraStatus('正在请求本机摄像头权限…', 'waiting');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+    });
+    cameraStream = stream;
+    const video = $('#camera-preview');
+    video.srcObject = stream;
+    await video.play();
+    updateCameraControls(true);
+    setCameraStatus('摄像头已开启。画面仅在本机预览，离开本页面会自动关闭。', 'active');
+    const [track] = stream.getVideoTracks();
+    track?.addEventListener('ended', () => {
+      if (cameraStream === stream) stopCamera(false);
+    }, { once: true });
+  } catch (error) {
+    cameraStream = undefined;
+    updateCameraControls(false);
+    setCameraStatus(cameraErrorMessage(error), 'error');
+  }
+}
+
+function stopCamera(showMessage = true) {
+  if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
+  cameraStream = undefined;
+  const video = $('#camera-preview');
+  video.srcObject = null;
+  updateCameraControls(false);
+  setCameraStatus('摄像头已关闭。', 'idle');
+  if (showMessage) toast('摄像头已关闭，本机画面已停止。');
 }
 
 function renderContacts() {
@@ -218,6 +278,7 @@ async function authorizeSelectedMemos() {
 
 function bindEvents() {
   document.querySelectorAll('.nav-button').forEach((node) => node.addEventListener('click', async () => {
+    if (node.dataset.page !== 'message' && cameraStream) stopCamera(false);
     if (node.dataset.page !== 'music' && activeMode) await stopMode();
     document.querySelectorAll('.nav-button, .page').forEach((item) => item.classList.remove('active'));
     node.classList.add('active');
@@ -233,6 +294,9 @@ function bindEvents() {
       $('#cancel-send').onclick = async () => resetMessageForm((await api('cancel_message')).message);
     } catch (error) { toast(error.message); }
   };
+
+  $('#start-camera').onclick = startCamera;
+  $('#stop-camera').onclick = () => stopCamera();
 
   $('#choose-memo').onclick = () => $('#memo-file').click();
   $('#memo-file').onchange = authorizeSelectedMemos;
@@ -262,11 +326,13 @@ async function init() {
   renderModes();
   renderGenres();
   bindEvents();
+  updateCameraControls(false);
 }
 
 init().catch((error) => toast(`初始化失败：${error.message}`));
 
 window.addEventListener('pagehide', () => {
+  stopCamera(false);
   if (!activeMode) return;
   navigator.sendBeacon('/api/action', JSON.stringify({ action: 'stop_mode_silent' }));
 });

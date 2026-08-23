@@ -26,7 +26,20 @@
       <section class="page active" id="message-page">
         <p class="section-label">场景 A · 语音 + 视线 + 联系人页面</p>
         <h2>给他发消息</h2>
-        <p>先点击模拟“注视”的联系人，再输入消息内容，模拟系统根据视线和语音中的“他”完成对象消歧。</p>
+        <p>先开启本机摄像头。第一阶段仅展示摄像头预览；下一阶段将依据画面估计用户注视的联系人。当前仍可点击联系人卡片作为备用演示输入。</p>
+        <section class="camera-panel" aria-labelledby="camera-title">
+          <div class="camera-preview">
+            <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
+            <p class="camera-placeholder" id="camera-placeholder">摄像头尚未开启</p>
+          </div>
+          <div class="camera-controls">
+            <h3 id="camera-title">本机摄像头</h3>
+            <p id="camera-status" class="camera-status" role="status">尚未请求摄像头权限。</p>
+            <button class="primary" id="start-camera">开启摄像头</button>
+            <button class="secondary" id="stop-camera" disabled>关闭摄像头</button>
+            <p class="camera-privacy">画面仅在当前浏览器本地预览，不上传服务器，也不会保存录像或截图。</p>
+          </div>
+        </section>
         <div class="card-grid" id="contacts"></div>
         <label>消息内容<textarea id="message-content" placeholder="例如：晚点开会"></textarea></label>
         <button class="primary" id="prepare-message">生成发送确认</button>

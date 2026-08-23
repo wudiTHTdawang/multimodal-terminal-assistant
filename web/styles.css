@@ -28,6 +28,18 @@ main { display: grid; grid-template-columns: 235px 1fr; min-height: calc(100vh -
 .page { display: none; max-width: 1000px; padding: 45px 54px; }
 .page.active { display: block; }
 .page > p:not(.section-label) { color: #57647a; line-height: 1.7; }
+.camera-panel { display: grid; grid-template-columns: minmax(300px, 1.35fr) minmax(235px, 1fr); gap: 20px; max-width: 760px; margin: 22px 0; padding: 18px; border: 1px solid #d7e1f5; border-radius: 14px; background: #fff; }
+.camera-preview { position: relative; min-height: 212px; overflow: hidden; border-radius: 10px; background: #172440; }
+#camera-preview { display: block; width: 100%; min-height: 212px; object-fit: cover; transform: scaleX(-1); }
+.camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: #d9e4ff; font-size: 14px; }
+.camera-controls { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 10px; }
+.camera-controls h3 { width: 100%; margin: 0; color: #263d93; font-size: 17px; }
+.camera-status { width: 100%; min-height: 42px; margin: 0; color: #52627d; font-size: 14px; line-height: 1.55; }
+.camera-status[data-status="active"] { color: #23714a; }
+.camera-status[data-status="error"] { color: #a23d3d; }
+.camera-status[data-status="waiting"] { color: #4b63b4; }
+.camera-controls button:disabled { cursor: not-allowed; opacity: .5; }
+.camera-privacy { margin: 2px 0 0; color: #71809a; font-size: 12px; line-height: 1.6; }
 .card-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 16px; margin: 26px 0; }
 .mode-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 12px; margin: 20px 0 12px; }
 .mode-status, .mode-decision { min-height: 24px; color: #52627d; font-size: 14px; }
@@ -62,3 +74,12 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .schedule-item.completed .schedule-title, .schedule-item.completed .schedule-time { color: #5f7869; text-decoration: line-through; }
 .toast { position: fixed; right: 28px; bottom: 26px; padding: 12px 18px; opacity: 0; transform: translateY(10px); color: #fff; border-radius: 9px; background: #1f315d; transition: .2s; pointer-events: none; }
 .toast.show { opacity: 1; transform: translateY(0); }
+@media (max-width: 920px) {
+  body { min-width: 0; }
+  main { grid-template-columns: 1fr; }
+  .sidebar { display: flex; gap: 8px; padding: 12px; border-right: 0; border-bottom: 1px solid #dde4f2; }
+  .nav-button { margin: 0; text-align: center; }
+  .note { display: none; }
+  .page { padding: 30px 24px; }
+  .camera-panel { grid-template-columns: 1fr; }
+}
