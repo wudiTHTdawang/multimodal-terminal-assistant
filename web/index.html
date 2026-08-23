@@ -12,34 +12,34 @@
         <p class="eyebrow">Windows 本地演示原型</p>
         <h1>多模态个性化终端助手</h1>
       </div>
-      <label class="profile-select">演示用户 <select id="profile"></select></label>
+      <div class="header-tools">
+        <div class="camera-switcher" aria-label="全局摄像头控制">
+          <p id="camera-status" class="camera-status" role="status">摄像头未开启</p>
+          <button class="camera-button" id="start-camera">开启摄像头</button>
+          <button class="camera-button" id="stop-camera" disabled>关闭</button>
+        </div>
+        <label class="profile-select">演示用户 <select id="profile"></select></label>
+      </div>
     </header>
+
+    <aside class="camera-floating" id="camera-panel" aria-label="本机摄像头预览" hidden>
+      <div class="camera-floating-title"><strong>本机摄像头</strong><span>仅本地处理</span></div>
+      <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
+      <p class="camera-privacy">预览不上传、不录像；关闭或离开页面时将停止。</p>
+    </aside>
 
     <main>
       <aside class="sidebar">
         <button class="nav-button active" data-page="message">消息发送</button>
         <button class="nav-button" data-page="music">音乐</button>
         <button class="nav-button" data-page="memo">日程安排</button>
-        <p class="note">当前为按钮模拟输入。后续将把按钮事件替换为语音识别、视线落点和点头确认模块。</p>
+        <p class="note">顶部摄像头开关一次授权后可供三个模块共用。后续将把页面上下文、视线落点与模拟语音合并理解。</p>
       </aside>
 
       <section class="page active" id="message-page">
         <p class="section-label">场景 A · 语音 + 视线 + 联系人页面</p>
         <h2>给他发消息</h2>
-        <p>先开启本机摄像头。第一阶段仅展示摄像头预览；下一阶段将依据画面估计用户注视的联系人。当前仍可点击联系人卡片作为备用演示输入。</p>
-        <section class="camera-panel" aria-labelledby="camera-title">
-          <div class="camera-preview">
-            <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
-            <p class="camera-placeholder" id="camera-placeholder">摄像头尚未开启</p>
-          </div>
-          <div class="camera-controls">
-            <h3 id="camera-title">本机摄像头</h3>
-            <p id="camera-status" class="camera-status" role="status">尚未请求摄像头权限。</p>
-            <button class="primary" id="start-camera">开启摄像头</button>
-            <button class="secondary" id="stop-camera" disabled>关闭摄像头</button>
-            <p class="camera-privacy">画面仅在当前浏览器本地预览，不上传服务器，也不会保存录像或截图。</p>
-          </div>
-        </section>
+        <p>页面右上角的全局摄像头可在一次授权后被消息、音乐和日程三个模块共用。第一阶段仅展示预览；下一阶段将把画面中的注视方向与当前页面内容对应。当前仍可点击联系人卡片作为备用演示输入。</p>
         <div class="card-grid" id="contacts"></div>
         <label>消息内容<textarea id="message-content" placeholder="例如：晚点开会"></textarea></label>
         <button class="primary" id="prepare-message">生成发送确认</button>

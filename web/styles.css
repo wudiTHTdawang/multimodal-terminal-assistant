@@ -18,8 +18,21 @@ h2 { margin-bottom: 10px; }
 .eyebrow, .section-label { font-size: 13px; font-weight: 700; letter-spacing: .08em; }
 .eyebrow { opacity: .8; margin-bottom: 5px; }
 .section-label { color: #5268b6; margin-bottom: 8px; }
+.header-tools { display: flex; align-items: center; justify-content: flex-end; gap: 16px; }
 .profile-select { font-size: 14px; font-weight: 700; }
 select { margin-left: 8px; padding: 8px; border: 0; border-radius: 8px; color: #263d93; }
+.camera-switcher { display: flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid #ffffff52; border-radius: 10px; background: #14275c36; }
+.camera-status { min-width: 112px; margin: 0; color: #e5edff; font-size: 12px; line-height: 1.35; }
+.camera-status[data-status="active"] { color: #c4f7d8; }
+.camera-status[data-status="error"] { color: #ffe1dd; }
+.camera-status[data-status="waiting"] { color: #fff0b1; }
+.camera-button { padding: 7px 10px; cursor: pointer; border: 1px solid #dfe8ff5e; border-radius: 7px; color: #29457e; background: #fff; font: inherit; font-size: 12px; font-weight: 700; }
+.camera-button:disabled { cursor: not-allowed; opacity: .45; }
+.camera-floating { position: fixed; z-index: 20; top: 128px; right: 24px; width: 230px; overflow: hidden; border: 1px solid #cbd8f0; border-radius: 12px; box-shadow: 0 10px 25px #263d9333; background: #fff; }
+.camera-floating-title { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; color: #29457e; font-size: 12px; }
+.camera-floating-title span { color: #65748d; font-size: 11px; }
+#camera-preview { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #172440; transform: scaleX(-1); }
+.camera-privacy { margin: 0; padding: 7px 10px; color: #71809a; font-size: 11px; line-height: 1.45; }
 main { display: grid; grid-template-columns: 235px 1fr; min-height: calc(100vh - 116px); }
 .sidebar { padding: 28px 18px; background: #ebf0f9; border-right: 1px solid #dde4f2; }
 .nav-button { display: block; width: 100%; padding: 13px 14px; margin-bottom: 8px; cursor: pointer; text-align: left; border: 0; border-radius: 9px; background: transparent; color: #50607a; font-size: 15px; }
@@ -28,18 +41,6 @@ main { display: grid; grid-template-columns: 235px 1fr; min-height: calc(100vh -
 .page { display: none; max-width: 1000px; padding: 45px 54px; }
 .page.active { display: block; }
 .page > p:not(.section-label) { color: #57647a; line-height: 1.7; }
-.camera-panel { display: grid; grid-template-columns: minmax(300px, 1.35fr) minmax(235px, 1fr); gap: 20px; max-width: 760px; margin: 22px 0; padding: 18px; border: 1px solid #d7e1f5; border-radius: 14px; background: #fff; }
-.camera-preview { position: relative; min-height: 212px; overflow: hidden; border-radius: 10px; background: #172440; }
-#camera-preview { display: block; width: 100%; min-height: 212px; object-fit: cover; transform: scaleX(-1); }
-.camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: #d9e4ff; font-size: 14px; }
-.camera-controls { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 10px; }
-.camera-controls h3 { width: 100%; margin: 0; color: #263d93; font-size: 17px; }
-.camera-status { width: 100%; min-height: 42px; margin: 0; color: #52627d; font-size: 14px; line-height: 1.55; }
-.camera-status[data-status="active"] { color: #23714a; }
-.camera-status[data-status="error"] { color: #a23d3d; }
-.camera-status[data-status="waiting"] { color: #4b63b4; }
-.camera-controls button:disabled { cursor: not-allowed; opacity: .5; }
-.camera-privacy { margin: 2px 0 0; color: #71809a; font-size: 12px; line-height: 1.6; }
 .card-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 16px; margin: 26px 0; }
 .mode-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 12px; margin: 20px 0 12px; }
 .mode-status, .mode-decision { min-height: 24px; color: #52627d; font-size: 14px; }
@@ -76,10 +77,12 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .toast.show { opacity: 1; transform: translateY(0); }
 @media (max-width: 920px) {
   body { min-width: 0; }
+  header { align-items: flex-start; gap: 14px; padding: 20px 24px; }
+  .header-tools { flex-direction: column-reverse; align-items: flex-end; gap: 8px; }
+  .camera-floating { top: 138px; right: 12px; width: 190px; }
   main { grid-template-columns: 1fr; }
   .sidebar { display: flex; gap: 8px; padding: 12px; border-right: 0; border-bottom: 1px solid #dde4f2; }
   .nav-button { margin: 0; text-align: center; }
   .note { display: none; }
   .page { padding: 30px 24px; }
-  .camera-panel { grid-template-columns: 1fr; }
 }

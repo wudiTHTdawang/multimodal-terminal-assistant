@@ -34,7 +34,7 @@ function setCameraStatus(message, status = 'idle') {
 function updateCameraControls(active) {
   $('#start-camera').disabled = active;
   $('#stop-camera').disabled = !active;
-  $('#camera-placeholder').hidden = active;
+  $('#camera-panel').hidden = !active;
 }
 
 function cameraErrorMessage(error) {
@@ -62,7 +62,7 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
     updateCameraControls(true);
-    setCameraStatus('摄像头已开启。画面仅在本机预览，离开本页面会自动关闭。', 'active');
+    setCameraStatus('摄像头已开启，可用于全部模块', 'active');
     const [track] = stream.getVideoTracks();
     track?.addEventListener('ended', () => {
       if (cameraStream === stream) stopCamera(false);
@@ -278,7 +278,6 @@ async function authorizeSelectedMemos() {
 
 function bindEvents() {
   document.querySelectorAll('.nav-button').forEach((node) => node.addEventListener('click', async () => {
-    if (node.dataset.page !== 'message' && cameraStream) stopCamera(false);
     if (node.dataset.page !== 'music' && activeMode) await stopMode();
     document.querySelectorAll('.nav-button, .page').forEach((item) => item.classList.remove('active'));
     node.classList.add('active');
