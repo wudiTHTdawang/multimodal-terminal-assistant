@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local runtime state and user-authorized memo copies
+data/runtime_state.json
+data/authorized_memos/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

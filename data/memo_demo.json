@@ -1,0 +1,42 @@
+[
+  {
+    "id": "memo_001",
+    "date": "2026-08-24",
+    "time": "10:00",
+    "duration_minutes": 90,
+    "title": "组会",
+    "content": "汇报多模态助手项目进展",
+    "location": "实验室 302",
+    "priority": "high"
+  },
+  {
+    "id": "memo_002",
+    "date": "2026-08-24",
+    "time": "14:00",
+    "duration_minutes": 30,
+    "title": "提交实验报告",
+    "content": "在课程平台提交 PDF",
+    "location": "线上",
+    "priority": "high"
+  },
+  {
+    "id": "memo_003",
+    "date": "2026-08-24",
+    "time": "19:00",
+    "duration_minutes": 60,
+    "title": "健身",
+    "content": "力量训练",
+    "location": "体育馆",
+    "priority": "low"
+  },
+  {
+    "id": "memo_004",
+    "date": "2026-08-25",
+    "time": "09:30",
+    "duration_minutes": 60,
+    "title": "论文阅读",
+    "content": "阅读多模态对齐相关论文",
+    "location": "图书馆",
+    "priority": "medium"
+  }
+]

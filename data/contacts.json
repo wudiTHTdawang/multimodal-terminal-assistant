@@ -1,0 +1,23 @@
+[
+  {
+    "id": "contact_zhangsan",
+    "name": "张三",
+    "relationship": "同学",
+    "page_box": { "x": 80, "y": 160, "width": 260, "height": 96 },
+    "frequent": true
+  },
+  {
+    "id": "contact_mama",
+    "name": "妈妈",
+    "relationship": "家人",
+    "page_box": { "x": 80, "y": 280, "width": 260, "height": 96 },
+    "frequent": true
+  },
+  {
+    "id": "contact_lisi",
+    "name": "李四",
+    "relationship": "同学",
+    "page_box": { "x": 80, "y": 400, "width": 260, "height": 96 },
+    "frequent": false
+  }
+]
