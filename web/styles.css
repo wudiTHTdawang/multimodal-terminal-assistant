@@ -35,6 +35,13 @@ select { margin-left: 8px; padding: 8px; border: 0; border-radius: 8px; color: #
 #camera-preview, #face-overlay { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 #face-overlay { pointer-events: none; }
 .camera-privacy { margin: 0; padding: 7px 10px; color: #71809a; font-size: 11px; line-height: 1.45; }
+.gaze-feedback { min-height: 31px; margin: 0; padding: 7px 10px 0; color: #4e6498; font-size: 11px; line-height: 1.45; }
+.gaze-calibration { position: fixed; z-index: 40; inset: 0; background: #101b38cc; }
+.gaze-calibration-guide { position: fixed; z-index: 41; top: 24px; left: 50%; width: min(440px, calc(100vw - 36px)); padding: 17px 18px; transform: translateX(-50%); border-radius: 13px; color: #20325f; background: #fff; box-shadow: 0 14px 34px #00000045; text-align: center; }
+.gaze-calibration-guide p { margin: 8px 0 13px; color: #536482; line-height: 1.55; }
+.gaze-calibration-point { position: fixed; z-index: 41; width: 28px; height: 28px; border: 5px solid #fff; border-radius: 50%; background: #4e79ee; box-shadow: 0 0 0 9px #4e79ee66, 0 0 24px #ffffffcc; transform: translate(-50%, -50%); transition: left .45s ease, top .45s ease; }
+.card.gaze-candidate, .schedule-item.gaze-candidate { border-color: #e1ad35; box-shadow: 0 0 0 3px #f4c66044; }
+.card.gaze-focused, .schedule-item.gaze-focused { border-color: #48a976; box-shadow: 0 0 0 3px #62cf9140; }
 main { display: grid; grid-template-columns: 235px 1fr; min-height: calc(100vh - 116px); }
 .sidebar { padding: 28px 18px; background: #ebf0f9; border-right: 1px solid #dde4f2; }
 .nav-button { display: block; width: 100%; padding: 13px 14px; margin-bottom: 8px; cursor: pointer; text-align: left; border: 0; border-radius: 9px; background: transparent; color: #50607a; font-size: 15px; }

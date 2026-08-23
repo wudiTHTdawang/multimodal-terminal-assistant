@@ -8,12 +8,25 @@ let faceLandmarker;
 let faceDetectionFrame;
 let lastFaceDetectionAt = 0;
 let lastFacePresence;
+let latestEyeFeatures;
+let gazeMapper;
+let previousGazeMapper;
+let gazeTargetElement;
+let gazeTargetSince = 0;
+let gazeTargetLocked = false;
+let calibrationActive = false;
+let calibrationTimer;
+let calibrationSamples = [];
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const FACE_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`;
 const FACE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/vision_bundle.mjs`;
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
+const CALIBRATION_POINTS = [
+  { x: 0.18, y: 0.27 }, { x: 0.82, y: 0.27 }, { x: 0.50, y: 0.52 },
+  { x: 0.18, y: 0.77 }, { x: 0.82, y: 0.77 },
+];
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -43,6 +56,7 @@ function setCameraStatus(message, status = 'idle') {
 
 function updateCameraControls(active) {
   $('#start-camera').disabled = active;
+  $('#calibrate-gaze').disabled = !active;
   $('#stop-camera').disabled = !active;
   $('#camera-panel').hidden = !active;
 }
@@ -87,6 +101,214 @@ function drawFaceLandmarks(landmarks) {
   });
 }
 
+function meanLandmark(landmarks, indexes) {
+  const points = indexes.map((index) => landmarks[index]).filter(Boolean);
+  if (!points.length) return undefined;
+  return {
+    x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+    y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+  };
+}
+
+function normalizedIrisPosition(landmarks, irisIndexes, eyeIndexes) {
+  const iris = meanLandmark(landmarks, irisIndexes);
+  const eye = eyeIndexes.map((index) => landmarks[index]).filter(Boolean);
+  if (!iris || eye.length !== eyeIndexes.length) return undefined;
+  const xValues = eye.map((point) => point.x);
+  const yValues = eye.map((point) => point.y);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
+  if (maxX - minX < 0.002 || maxY - minY < 0.002) return undefined;
+  return [(iris.x - minX) / (maxX - minX), (iris.y - minY) / (maxY - minY)];
+}
+
+function extractEyeFeatures(landmarks) {
+  const left = normalizedIrisPosition(landmarks, [468, 469, 470, 471, 472], [33, 133, 159, 145]);
+  const right = normalizedIrisPosition(landmarks, [473, 474, 475, 476, 477], [362, 263, 386, 374]);
+  return left && right ? [...left, ...right] : undefined;
+}
+
+function solveLinearSystem(matrix, vector) {
+  const size = vector.length;
+  const augmented = matrix.map((row, index) => [...row, vector[index]]);
+  for (let pivot = 0; pivot < size; pivot += 1) {
+    let bestRow = pivot;
+    for (let row = pivot + 1; row < size; row += 1) {
+      if (Math.abs(augmented[row][pivot]) > Math.abs(augmented[bestRow][pivot])) bestRow = row;
+    }
+    if (Math.abs(augmented[bestRow][pivot]) < 1e-8) throw new Error('校准数据差异不足，请保持正对屏幕后重新校准。');
+    [augmented[pivot], augmented[bestRow]] = [augmented[bestRow], augmented[pivot]];
+    const divisor = augmented[pivot][pivot];
+    for (let column = pivot; column <= size; column += 1) augmented[pivot][column] /= divisor;
+    for (let row = 0; row < size; row += 1) {
+      if (row === pivot) continue;
+      const factor = augmented[row][pivot];
+      for (let column = pivot; column <= size; column += 1) augmented[row][column] -= factor * augmented[pivot][column];
+    }
+  }
+  return augmented.map((row) => row[size]);
+}
+
+function fitGazeMapper(samples) {
+  const width = samples[0].features.length + 1;
+  const normal = Array.from({ length: width }, () => Array(width).fill(0));
+  const targetX = Array(width).fill(0);
+  const targetY = Array(width).fill(0);
+  samples.forEach((sample) => {
+    const row = [1, ...sample.features];
+    row.forEach((left, i) => row.forEach((right, j) => { normal[i][j] += left * right; }));
+    row.forEach((value, i) => {
+      targetX[i] += value * sample.screenX;
+      targetY[i] += value * sample.screenY;
+    });
+  });
+  normal.forEach((row, index) => { row[index] += 0.0001; });
+  return { x: solveLinearSystem(normal, targetX), y: solveLinearSystem(normal, targetY) };
+}
+
+function predictGazePoint(features) {
+  if (!gazeMapper) return undefined;
+  const row = [1, ...features];
+  const dot = (weights) => weights.reduce((sum, value, index) => sum + value * row[index], 0);
+  return {
+    x: Math.max(0, Math.min(window.innerWidth, dot(gazeMapper.x))),
+    y: Math.max(0, Math.min(window.innerHeight, dot(gazeMapper.y))),
+  };
+}
+
+function clearGazeTarget() {
+  document.querySelectorAll('.gaze-candidate, .gaze-focused').forEach((node) => {
+    node.classList.remove('gaze-candidate', 'gaze-focused');
+  });
+  gazeTargetElement = undefined;
+  gazeTargetLocked = false;
+  gazeTargetSince = 0;
+}
+
+function eligibleGazeElements() {
+  const activePage = document.querySelector('.page.active')?.id;
+  const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.genre' : '.schedule-item';
+  return [...document.querySelectorAll(selector)].filter((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+}
+
+function distanceToRect(point, rect) {
+  const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
+  const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
+  return Math.hypot(dx, dy);
+}
+
+async function lockGazeTarget(node) {
+  node.classList.add('gaze-focused');
+  const label = node.querySelector('strong')?.textContent || node.querySelector('.schedule-title')?.textContent || '当前项目';
+  $('#gaze-feedback').textContent = `已持续注视：${label}`;
+  if (node.classList.contains('contact')) {
+    try {
+      await api('select_contact', { contact_id: node.dataset.id });
+      document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
+      node.classList.add('selected');
+      toast(`已通过摄像头注视选择：${label}`);
+    } catch (error) { toast(error.message); }
+  }
+}
+
+function updateGazeTarget(point) {
+  if (!point || calibrationActive) return;
+  const candidates = eligibleGazeElements();
+  let closest;
+  let closestDistance = Infinity;
+  candidates.forEach((node) => {
+    const distance = distanceToRect(point, node.getBoundingClientRect());
+    if (distance < closestDistance) {
+      closest = node;
+      closestDistance = distance;
+    }
+  });
+  if (!closest || closestDistance > 68) {
+    clearGazeTarget();
+    $('#gaze-feedback').textContent = '正在估计注视位置，请将视线停留在页面卡片上。';
+    return;
+  }
+  if (gazeTargetElement !== closest) {
+    clearGazeTarget();
+    gazeTargetElement = closest;
+    gazeTargetSince = performance.now();
+    closest.classList.add('gaze-candidate');
+    const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
+    $('#gaze-feedback').textContent = `候选注视：${label}（停留约 0.8 秒确认）`;
+    return;
+  }
+  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 800) {
+    gazeTargetLocked = true;
+    lockGazeTarget(closest);
+  }
+}
+
+function updateCalibrationPoint(point) {
+  const target = $('#gaze-calibration-point');
+  target.style.left = `${point.x * 100}vw`;
+  target.style.top = `${point.y * 100}vh`;
+}
+
+function finishCalibration(success, message) {
+  clearTimeout(calibrationTimer);
+  calibrationActive = false;
+  $('#gaze-calibration').hidden = true;
+  if (success) {
+    $('#gaze-feedback').textContent = '校准完成。请注视页面中的卡片，停留约 0.8 秒。';
+    setCameraStatus('视线校准已完成，可识别当前页面注视对象', 'active');
+  } else {
+    gazeMapper = previousGazeMapper;
+    $('#gaze-feedback').textContent = message;
+  }
+}
+
+function runCalibrationStep(index) {
+  if (!calibrationActive) return;
+  if (index >= CALIBRATION_POINTS.length) {
+    try {
+      gazeMapper = fitGazeMapper(calibrationSamples);
+      finishCalibration(true);
+    } catch (error) {
+      finishCalibration(false, error.message);
+    }
+    return;
+  }
+  const point = CALIBRATION_POINTS[index];
+  updateCalibrationPoint(point);
+  $('#calibration-instruction').textContent = `请持续注视蓝点。正在采集第 ${index + 1} / ${CALIBRATION_POINTS.length} 个位置…`;
+  calibrationTimer = window.setTimeout(() => {
+    if (!latestEyeFeatures) {
+      $('#calibration-instruction').textContent = '没有检测到眼部关键点，请正对摄像头后保持注视。将重新采集此位置…';
+      calibrationTimer = window.setTimeout(() => runCalibrationStep(index), 1300);
+      return;
+    }
+    calibrationSamples.push({
+      features: [...latestEyeFeatures],
+      screenX: window.innerWidth * point.x,
+      screenY: window.innerHeight * point.y,
+    });
+    calibrationTimer = window.setTimeout(() => runCalibrationStep(index + 1), 650);
+  }, 2200);
+}
+
+function startGazeCalibration() {
+  if (!cameraStream || !latestEyeFeatures) {
+    toast('请先开启摄像头，并确认已检测到人脸和眼部关键点。');
+    return;
+  }
+  previousGazeMapper = gazeMapper;
+  calibrationSamples = [];
+  calibrationActive = true;
+  clearGazeTarget();
+  $('#gaze-calibration').hidden = false;
+  runCalibrationStep(0);
+}
+
 async function initializeFaceLandmarker() {
   if (faceLandmarker) return;
   const { FaceLandmarker, FilesetResolver } = await import(FACE_BUNDLE_URL);
@@ -120,8 +342,15 @@ function runFaceDetection() {
     try {
       const result = faceLandmarker.detectForVideo(video, now);
       const landmarks = result.faceLandmarks?.[0];
-      if (landmarks) drawFaceLandmarks(landmarks);
-      else clearFaceOverlay();
+      if (landmarks) {
+        drawFaceLandmarks(landmarks);
+        latestEyeFeatures = extractEyeFeatures(landmarks);
+        if (gazeMapper && latestEyeFeatures) updateGazeTarget(predictGazePoint(latestEyeFeatures));
+      } else {
+        latestEyeFeatures = undefined;
+        clearFaceOverlay();
+        clearGazeTarget();
+      }
       updateFacePresence(Boolean(landmarks));
     } catch (error) {
       setCameraStatus(`人脸关键点检测暂时不可用：${error.message || '未知错误'}`, 'error');
@@ -183,9 +412,13 @@ async function startCamera() {
 }
 
 function stopCamera(showMessage = true) {
+  if (calibrationActive) finishCalibration(false, '摄像头已关闭，已取消本次视线校准。');
   cancelAnimationFrame(faceDetectionFrame);
   faceDetectionFrame = undefined;
   lastFacePresence = undefined;
+  latestEyeFeatures = undefined;
+  gazeMapper = undefined;
+  clearGazeTarget();
   clearFaceOverlay();
   if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
   cameraStream = undefined;
@@ -408,7 +641,9 @@ function bindEvents() {
   };
 
   $('#start-camera').onclick = startCamera;
+  $('#calibrate-gaze').onclick = startGazeCalibration;
   $('#stop-camera').onclick = () => stopCamera();
+  $('#cancel-calibration').onclick = () => finishCalibration(false, '已取消视线校准。');
 
   $('#choose-memo').onclick = () => $('#memo-file').click();
   $('#memo-file').onchange = authorizeSelectedMemos;

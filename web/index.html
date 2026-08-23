@@ -16,6 +16,7 @@
         <div class="camera-switcher" aria-label="全局摄像头控制">
           <p id="camera-status" class="camera-status" role="status">摄像头未开启</p>
           <button class="camera-button" id="start-camera">开启摄像头</button>
+          <button class="camera-button" id="calibrate-gaze" disabled>校准视线</button>
           <button class="camera-button" id="stop-camera" disabled>关闭</button>
         </div>
         <label class="profile-select">演示用户 <select id="profile"></select></label>
@@ -28,8 +29,18 @@
         <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
         <canvas id="face-overlay" aria-label="人脸关键点调试叠加层"></canvas>
       </div>
+      <p class="gaze-feedback" id="gaze-feedback">开启摄像头后可进行视线校准。</p>
       <p class="camera-privacy">预览不上传、不录像；关闭或离开页面时将停止。</p>
     </aside>
+
+    <section class="gaze-calibration" id="gaze-calibration" aria-live="polite" hidden>
+      <div class="gaze-calibration-guide">
+        <strong>视线校准</strong>
+        <p id="calibration-instruction">请注视蓝色圆点，系统会自动采样。</p>
+        <button class="secondary" id="cancel-calibration">取消校准</button>
+      </div>
+      <span class="gaze-calibration-point" id="gaze-calibration-point" aria-hidden="true"></span>
+    </section>
 
     <main>
       <aside class="sidebar">
