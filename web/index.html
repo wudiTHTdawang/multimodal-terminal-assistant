@@ -23,8 +23,11 @@
     </header>
 
     <aside class="camera-floating" id="camera-panel" aria-label="本机摄像头预览" hidden>
-      <div class="camera-floating-title"><strong>本机摄像头</strong><span>仅本地处理</span></div>
-      <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
+      <div class="camera-floating-title"><strong>本机摄像头</strong><span id="camera-context">上下文：消息发送</span></div>
+      <div class="camera-stage">
+        <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
+        <canvas id="face-overlay" aria-label="人脸关键点调试叠加层"></canvas>
+      </div>
       <p class="camera-privacy">预览不上传、不录像；关闭或离开页面时将停止。</p>
     </aside>
 

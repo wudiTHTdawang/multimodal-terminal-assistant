@@ -31,7 +31,9 @@ select { margin-left: 8px; padding: 8px; border: 0; border-radius: 8px; color: #
 .camera-floating { position: fixed; z-index: 20; top: 128px; right: 24px; width: 230px; overflow: hidden; border: 1px solid #cbd8f0; border-radius: 12px; box-shadow: 0 10px 25px #263d9333; background: #fff; }
 .camera-floating-title { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; color: #29457e; font-size: 12px; }
 .camera-floating-title span { color: #65748d; font-size: 11px; }
-#camera-preview { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #172440; transform: scaleX(-1); }
+.camera-stage { position: relative; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; background: #172440; }
+#camera-preview, #face-overlay { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+#face-overlay { pointer-events: none; }
 .camera-privacy { margin: 0; padding: 7px 10px; color: #71809a; font-size: 11px; line-height: 1.45; }
 main { display: grid; grid-template-columns: 235px 1fr; min-height: calc(100vh - 116px); }
 .sidebar { padding: 28px 18px; background: #ebf0f9; border-right: 1px solid #dde4f2; }

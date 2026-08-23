@@ -4,6 +4,16 @@ let currentTrack;
 let activeMode;
 let switchArmed = false;
 let cameraStream;
+let faceLandmarker;
+let faceDetectionFrame;
+let lastFaceDetectionAt = 0;
+let lastFacePresence;
+
+const FACE_TASK_VERSION = '1.0.1';
+const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const FACE_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`;
+const FACE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/vision_bundle.mjs`;
+const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -37,6 +47,104 @@ function updateCameraControls(active) {
   $('#camera-panel').hidden = !active;
 }
 
+function setCameraContext(label) {
+  $('#camera-context').textContent = `上下文：${label}`;
+}
+
+function clearFaceOverlay() {
+  const canvas = $('#face-overlay');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawFaceLandmarks(landmarks) {
+  const video = $('#camera-preview');
+  const canvas = $('#face-overlay');
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+  const context = canvas.getContext('2d');
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  const xValues = landmarks.map((point) => point.x * canvas.width);
+  const yValues = landmarks.map((point) => point.y * canvas.height);
+  const left = Math.min(...xValues);
+  const top = Math.min(...yValues);
+  const width = Math.max(...xValues) - left;
+  const height = Math.max(...yValues) - top;
+  context.strokeStyle = '#62e0a1';
+  context.lineWidth = Math.max(2, canvas.width / 250);
+  context.strokeRect(left, top, width, height);
+
+  context.fillStyle = '#bfffe0';
+  const radius = Math.max(1.8, canvas.width / 280);
+  EYE_LANDMARKS.forEach((index) => {
+    const point = landmarks[index];
+    if (!point) return;
+    context.beginPath();
+    context.arc(point.x * canvas.width, point.y * canvas.height, radius, 0, Math.PI * 2);
+    context.fill();
+  });
+}
+
+async function initializeFaceLandmarker() {
+  if (faceLandmarker) return;
+  const { FaceLandmarker, FilesetResolver } = await import(FACE_BUNDLE_URL);
+  const vision = await FilesetResolver.forVisionTasks(FACE_WASM_URL);
+  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: FACE_MODEL_URL },
+    runningMode: 'VIDEO',
+    numFaces: 1,
+    minFaceDetectionConfidence: 0.55,
+    minFacePresenceConfidence: 0.55,
+    minTrackingConfidence: 0.55,
+  });
+}
+
+function updateFacePresence(hasFace) {
+  if (lastFacePresence === hasFace) return;
+  lastFacePresence = hasFace;
+  if (hasFace) {
+    setCameraStatus('已检测到人脸与眼部关键点（本机处理）', 'active');
+  } else {
+    setCameraStatus('未检测到人脸，请正对屏幕并保持光线充足', 'waiting');
+  }
+}
+
+function runFaceDetection() {
+  const video = $('#camera-preview');
+  if (!cameraStream || !faceLandmarker || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+  const now = performance.now();
+  if (now - lastFaceDetectionAt >= 120) {
+    lastFaceDetectionAt = now;
+    try {
+      const result = faceLandmarker.detectForVideo(video, now);
+      const landmarks = result.faceLandmarks?.[0];
+      if (landmarks) drawFaceLandmarks(landmarks);
+      else clearFaceOverlay();
+      updateFacePresence(Boolean(landmarks));
+    } catch (error) {
+      setCameraStatus(`人脸关键点检测暂时不可用：${error.message || '未知错误'}`, 'error');
+      return;
+    }
+  }
+  faceDetectionFrame = requestAnimationFrame(runFaceDetection);
+}
+
+async function startFaceDetection() {
+  try {
+    setCameraStatus('摄像头已开启，正在加载本机人脸关键点模型…', 'waiting');
+    await initializeFaceLandmarker();
+    if (!cameraStream) return;
+    lastFaceDetectionAt = 0;
+    lastFacePresence = undefined;
+    cancelAnimationFrame(faceDetectionFrame);
+    faceDetectionFrame = requestAnimationFrame(runFaceDetection);
+  } catch (error) {
+    setCameraStatus(`摄像头预览正常，但人脸模型加载失败：${error.message || '请检查网络后重试'}`, 'error');
+  }
+}
+
 function cameraErrorMessage(error) {
   if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
     return '未获得摄像头权限。请在浏览器地址栏的权限设置中允许摄像头后重试。';
@@ -62,7 +170,7 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
     updateCameraControls(true);
-    setCameraStatus('摄像头已开启，可用于全部模块', 'active');
+    startFaceDetection();
     const [track] = stream.getVideoTracks();
     track?.addEventListener('ended', () => {
       if (cameraStream === stream) stopCamera(false);
@@ -75,6 +183,10 @@ async function startCamera() {
 }
 
 function stopCamera(showMessage = true) {
+  cancelAnimationFrame(faceDetectionFrame);
+  faceDetectionFrame = undefined;
+  lastFacePresence = undefined;
+  clearFaceOverlay();
   if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
   cameraStream = undefined;
   const video = $('#camera-preview');
@@ -282,6 +394,7 @@ function bindEvents() {
     document.querySelectorAll('.nav-button, .page').forEach((item) => item.classList.remove('active'));
     node.classList.add('active');
     $(`#${node.dataset.page}-page`).classList.add('active');
+    setCameraContext(node.textContent.trim());
   }));
 
   $('#prepare-message').onclick = async () => {
