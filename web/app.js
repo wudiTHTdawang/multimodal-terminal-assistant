@@ -22,6 +22,9 @@ let lastLockedGaze;
 let gazeSuggestionCooldownUntil = 0;
 let selectedContactId;
 let selectedContactSource;
+let pendingGazeSuggestion;
+let headMotionHistory = [];
+let lastHeadGestureAt = 0;
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -237,6 +240,12 @@ function clearGazeTarget() {
   gazeTargetSince = 0;
 }
 
+function clearGazeSuggestion() {
+  document.querySelector('.contact-gaze-prompt')?.remove();
+  pendingGazeSuggestion = undefined;
+  headMotionHistory = [];
+}
+
 function adjustGazeReliability(outcome) {
   if (!gazeMapper || !lastLockedGaze?.zone) return;
   const stats = gazeMapper.zone_stats[lastLockedGaze.zone];
@@ -350,6 +359,27 @@ async function submitSimulatedSpeech() {
     toast('请输入或选择一条模拟语音指令。');
     return;
   }
+
+  // 联系人候选出现时，优先将简短的“是 / 不用”视为对候选的回答，
+  // 而不是一条新的消息发送指令。
+  if (pendingGazeSuggestion) {
+    const decision = parseContactSuggestionSpeech(text);
+    if (decision === 'confirm') {
+      const suggestion = pendingGazeSuggestion;
+      clearGazeSuggestion();
+      $('#message-content').value = '';
+      await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+      return;
+    }
+    if (decision === 'reject') {
+      rejectGazeSuggestion();
+      $('#message-content').value = '';
+      return;
+    }
+    toast('可以说“是”或“不用”，也可以点头或摇头。');
+    return;
+  }
+
   const timestamp = Date.now();
   await recordBrowserEvent({
     modality: 'speech_text',
@@ -379,9 +409,16 @@ function distanceToRect(point, rect) {
 }
 
 async function lockGazeTarget(node, zone, confidence) {
+  clearGazeSuggestion();
   node.classList.add('gaze-focused');
   const metadata = targetMetadata(node);
   const label = metadata.label;
+  const isContact = node.classList.contains('contact');
+  if (isContact) {
+    // 先锁定本轮联系人，避免等待事件写入或接口响应时又弹出新的候选提示。
+    selectedContactId = node.dataset.id;
+    selectedContactSource = 'gaze';
+  }
   $('#gaze-feedback').textContent = `已持续注视：${label}`;
   await recordBrowserEvent({
     modality: 'gaze',
@@ -397,34 +434,70 @@ async function lockGazeTarget(node, zone, confidence) {
     },
   });
   lastLockedGaze = { zone, target_id: metadata.target_id };
-  if (node.classList.contains('contact')) {
+  if (isContact) {
     try {
       await api('select_contact', { contact_id: node.dataset.id });
-      selectedContactId = node.dataset.id;
-      selectedContactSource = 'gaze';
       document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
       node.classList.add('selected');
       $('#message-result').innerHTML = '';
       $('#gaze-feedback').textContent = `已确认选择：${label}。现在可提交模拟语音指令。`;
       toast(`已通过摄像头注视选择：${label}`);
-    } catch (error) { toast(error.message); }
+    } catch (error) {
+      selectedContactId = undefined;
+      selectedContactSource = undefined;
+      toast(error.message);
+    }
   }
 }
 
+function parseContactSuggestionSpeech(text) {
+  const normalized = text.replace(/[，。！？、\s]/g, '').toLowerCase();
+  if (/^(是|是的|好的|好|确认|选中|选择|帮我选|可以)$/.test(normalized)) return 'confirm';
+  if (/^(不|不是|不用|暂不|取消|继续识别|不要)$/.test(normalized)) return 'reject';
+  return undefined;
+}
+
+function positionGazePrompt(prompt, node) {
+  const rect = node.getBoundingClientRect();
+  const width = 250;
+  const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+  const top = Math.min(rect.bottom + 8, window.innerHeight - 132);
+  prompt.style.left = `${left}px`;
+  prompt.style.top = `${Math.max(12, top)}px`;
+}
+
+function rejectGazeSuggestion() {
+  gazeSuggestionCooldownUntil = Date.now() + 3000;
+  clearGazeSuggestion();
+  clearGazeTarget();
+  $('#gaze-feedback').textContent = '好的，我会继续留意你的注视。';
+}
+
 function showContactGazeSuggestion(node, zone, confidence) {
+  if (selectedContactId || pendingMessage || pendingGazeSuggestion) return;
   const metadata = targetMetadata(node);
-  $('#message-result').innerHTML = `<div class="result-box gaze-suggestion"><strong>系统推测你正在看：${metadata.label}</strong><p>当前置信度 ${confidence.toFixed(2)}。是否选择该联系人？</p><button class="primary" id="confirm-gaze-contact">是，选择${metadata.label}</button><button class="secondary" id="reject-gaze-contact">不是，继续识别</button></div>`;
-  $('#confirm-gaze-contact').onclick = () => lockGazeTarget(node, zone, confidence);
-  $('#reject-gaze-contact').onclick = () => {
-    gazeSuggestionCooldownUntil = Date.now() + 3000;
-    clearGazeTarget();
-    $('#message-result').innerHTML = '';
-    $('#gaze-feedback').textContent = '已继续识别。请保持正对屏幕并注视目标联系人。';
+  const prompt = document.createElement('section');
+  prompt.className = 'contact-gaze-prompt';
+  prompt.innerHTML = `<strong>看起来你想联系 ${metadata.label}</strong><p>需要我帮你选中这位联系人吗？</p><div><button class="primary" data-decision="confirm">选中</button><button class="secondary" data-decision="reject">暂不</button></div><small>也可说“是”或“不用”，或点头 / 摇头。</small>`;
+  document.body.append(prompt);
+  positionGazePrompt(prompt, node);
+  pendingGazeSuggestion = { node, zone, confidence };
+  headMotionHistory = [];
+  prompt.querySelector('[data-decision="confirm"]').onclick = async () => {
+    const suggestion = pendingGazeSuggestion;
+    clearGazeSuggestion();
+    if (suggestion) await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
   };
+  prompt.querySelector('[data-decision="reject"]').onclick = rejectGazeSuggestion;
 }
 
 function updateGazeTarget(prediction) {
-  if (!prediction || calibrationActive) return;
+  // 已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
+  if (selectedContactId || pendingMessage) {
+    clearGazeTarget();
+    return;
+  }
+  if (!prediction || calibrationActive || pendingGazeSuggestion) return;
   const { zone, confidence, zoneScores } = prediction;
   const rankedCandidates = eligibleGazeElements().map((node) => ({
     node,
@@ -446,7 +519,7 @@ function updateGazeTarget(prediction) {
     gazeTargetSince = performance.now();
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
-    $('#gaze-feedback').textContent = `候选注视：${label}（区域 ${bestCandidate.zone}，置信度 ${confidence.toFixed(2)}）`;
+    $('#gaze-feedback').textContent = `正在留意：${label}`;
     return;
   }
   if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 700) {
@@ -458,6 +531,32 @@ function updateGazeTarget(prediction) {
     } else {
       $('#gaze-feedback').textContent = `系统已找到多个接近候选，当前优先显示：${closest.querySelector('strong')?.textContent || '该对象'}。`;
     }
+  }
+}
+
+function observeHeadGesture(landmarks) {
+  if (!pendingGazeSuggestion || Date.now() - lastHeadGestureAt < 1500) return;
+  const xValues = landmarks.map((point) => point.x);
+  const yValues = landmarks.map((point) => point.y);
+  headMotionHistory.push({
+    time: performance.now(),
+    x: (Math.min(...xValues) + Math.max(...xValues)) / 2,
+    y: (Math.min(...yValues) + Math.max(...yValues)) / 2,
+  });
+  const cutoff = performance.now() - 1100;
+  headMotionHistory = headMotionHistory.filter((sample) => sample.time >= cutoff);
+  if (headMotionHistory.length < 5) return;
+
+  const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.x)) - Math.min(...headMotionHistory.map((sample) => sample.x));
+  const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.y)) - Math.min(...headMotionHistory.map((sample) => sample.y));
+  if (verticalRange > 0.045 && verticalRange > horizontalRange * 1.45) {
+    const suggestion = pendingGazeSuggestion;
+    lastHeadGestureAt = Date.now();
+    clearGazeSuggestion();
+    if (suggestion) void lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+  } else if (horizontalRange > 0.055 && horizontalRange > verticalRange * 1.3) {
+    lastHeadGestureAt = Date.now();
+    rejectGazeSuggestion();
   }
 }
 
@@ -571,6 +670,7 @@ function runFaceDetection() {
       const landmarks = result.faceLandmarks?.[0];
       if (landmarks) {
         drawFaceLandmarks(landmarks);
+        observeHeadGesture(landmarks);
         latestEyeFeatures = extractEyeFeatures(landmarks);
         if (latestEyeFeatures) {
           eyeFeatureHistory.push([...latestEyeFeatures]);
@@ -667,13 +767,21 @@ function renderContacts() {
       <strong>${contact.name}</strong><small>${contact.relationship}${contact.frequent ? ' · 常用联系人' : ''}</small>
     </button>`).join('');
   document.querySelectorAll('.contact').forEach((node) => node.addEventListener('click', async () => {
-    await api('select_contact', { contact_id: node.dataset.id });
+    clearGazeSuggestion();
+    clearGazeTarget();
     lastLockedGaze = undefined;
     selectedContactId = node.dataset.id;
     selectedContactSource = 'manual';
-    document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
-    node.classList.add('selected');
-    toast(`已模拟注视：${node.querySelector('strong').textContent}`);
+    try {
+      await api('select_contact', { contact_id: node.dataset.id });
+      document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
+      node.classList.add('selected');
+      toast(`已模拟注视：${node.querySelector('strong').textContent}`);
+    } catch (error) {
+      selectedContactId = undefined;
+      selectedContactSource = undefined;
+      toast(error.message);
+    }
   }));
 }
 
@@ -891,6 +999,8 @@ function resetMessageForm(message) {
   pendingMessage = undefined;
   selectedContactId = undefined;
   selectedContactSource = undefined;
+  clearGazeSuggestion();
+  clearGazeTarget();
   $('#message-content').value = '';
   $('#message-result').innerHTML = '';
   document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
