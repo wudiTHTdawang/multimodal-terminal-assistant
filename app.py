@@ -152,7 +152,7 @@ def parse_simulated_speech(text):
     return "unknown", ""
 
 
-def understand_multimodal_command(state, speech_timestamp_ms):
+def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
     events = recent_multimodal_events()
     speech_events = [
         item for item in events
@@ -178,6 +178,7 @@ def understand_multimodal_command(state, speech_timestamp_ms):
     if not content:
         return {"message": "请补充需要发送的消息内容。", "intent": intent, "needs_clarification": True, "explanation": ["识别到发送消息意图，但缺少消息正文。"]}
 
+    manual_contact = find_contact(preferred_contact_id) if preferred_contact_id else None
     gaze_events = [
         item for item in events
         if item["modality"] == "gaze"
@@ -185,26 +186,33 @@ def understand_multimodal_command(state, speech_timestamp_ms):
         and item["payload"].get("target_type") == "contact"
         and speech_timestamp_ms - 4_000 <= item["timestamp_ms"] <= speech_timestamp_ms + 1_000
     ]
-    if not gaze_events:
-        return {"message": "请先稳定注视需要联系的联系人，再提交模拟语音。", "intent": intent, "needs_clarification": True, "explanation": ["语音前后 4 秒内未找到有效联系人注视事件。"]}
-    gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)))
-    contact = find_contact(gaze["payload"].get("target_id"))
-    if not contact:
-        return {"message": "注视目标不在当前联系人页面，请重新注视联系人。", "intent": intent, "needs_clarification": True, "explanation": ["注视事件中的联系人 ID 无法匹配本地联系人。"]}
-
-    context_events = [
-        item for item in events
-        if item["modality"] == "screen_context"
-        and item["payload"].get("page") == "message"
-        and abs(item["timestamp_ms"] - speech_timestamp_ms) <= 5_000
-    ]
-    visible_ids = {
-        target.get("target_id")
-        for context in context_events
-        for target in context["payload"].get("visible_targets", [])
-    }
-    if visible_ids and contact["id"] not in visible_ids:
-        return {"message": "联系人页面已变化，请重新注视后再试。", "intent": intent, "needs_clarification": True, "explanation": ["屏幕上下文中不包含该注视联系人。"]}
+    gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
+    if manual_contact:
+        contact = manual_contact
+        target_explanation = f"本轮优先使用手动选中的联系人：{contact['name']}。"
+    elif gaze:
+        contact = find_contact(gaze["payload"].get("target_id"))
+        if not contact:
+            return {"message": "注视目标不在当前联系人页面，请重新注视联系人。", "intent": intent, "needs_clarification": True, "explanation": ["注视事件中的联系人 ID 无法匹配本地联系人。"]}
+        context_events = [
+            item for item in events
+            if item["modality"] == "screen_context"
+            and item["payload"].get("page") == "message"
+            and abs(item["timestamp_ms"] - speech_timestamp_ms) <= 5_000
+        ]
+        visible_ids = {
+            target.get("target_id")
+            for context in context_events
+            for target in context["payload"].get("visible_targets", [])
+        }
+        if visible_ids and contact["id"] not in visible_ids:
+            return {"message": "联系人页面已变化，请重新注视后再试。", "intent": intent, "needs_clarification": True, "explanation": ["屏幕上下文中不包含该注视联系人。"]}
+        target_explanation = f"在语音前后 4 秒内检测到对{contact['name']}的稳定注视（{gaze['payload']['dwell_ms']}ms，置信度 {gaze['confidence']}）"
+    else:
+        contact = find_contact(state.get("selected_contact"))
+        if not contact:
+            return {"message": "请先注视确认或手动点击需要联系的联系人，再提交模拟语音。", "intent": intent, "needs_clarification": True, "explanation": ["未找到有效视线事件，也没有手动选中的联系人。"]}
+        target_explanation = f"未使用有效视线事件，改用手动选中的联系人：{contact['name']}。"
 
     pending = {"contact": contact["name"], "contact_id": contact["id"], "content": content}
     state["selected_contact"] = contact["id"]
@@ -216,7 +224,7 @@ def understand_multimodal_command(state, speech_timestamp_ms):
         "pending": pending,
         "explanation": [
             f"识别到模拟语音：{speech['payload']['text']}",
-            f"在语音前后 4 秒内检测到对{contact['name']}的稳定注视（{gaze['payload']['dwell_ms']}ms，置信度 {gaze['confidence']}）",
+            target_explanation,
             "当前屏幕上下文为联系人页面，因此将“他”解析为该联系人。",
         ],
     }
@@ -384,7 +392,7 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             timestamp_ms = payload.get("speech_timestamp_ms")
             if not isinstance(timestamp_ms, int):
                 raise ValueError("speech_timestamp_ms 必须是语音事件的毫秒时间戳。")
-            return understand_multimodal_command(state, timestamp_ms)
+            return understand_multimodal_command(state, timestamp_ms, payload.get("preferred_contact_id"))
 
         if action == "select_contact":
             state["selected_contact"] = payload["contact_id"]

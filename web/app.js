@@ -19,6 +19,9 @@ let calibrationTimer;
 let calibrationSamples = [];
 let eyeFeatureHistory = [];
 let lastLockedGaze;
+let gazeSuggestionCooldownUntil = 0;
+let selectedContactId;
+let selectedContactSource;
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -217,7 +220,12 @@ function predictGazePoint(features) {
   if (!best || !second) return undefined;
   const margin = Math.max(0, Math.min(1, (second.distance - best.distance) / Math.max(second.distance, 0.0001)));
   const reliability = gazeMapper.zone_stats[best.zone]?.reliability ?? 1;
-  return { zone: best.zone, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)) };
+  const maxDistance = Math.max(...ranked.map((item) => item.distance), 0.0001);
+  const zoneScores = Object.fromEntries(ranked.map((item) => [
+    item.zone,
+    Math.max(0.05, (1 - item.distance / maxDistance) * (gazeMapper.zone_stats[item.zone]?.reliability ?? 1)),
+  ]));
+  return { zone: best.zone, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)), zoneScores };
 }
 
 function clearGazeTarget() {
@@ -350,7 +358,10 @@ async function submitSimulatedSpeech() {
     payload: { text, page: 'message', source: 'simulated' },
   });
   try {
-    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    const result = await api('understand_multimodal_command', {
+      speech_timestamp_ms: timestamp,
+      preferred_contact_id: selectedContactSource === 'manual' ? selectedContactId : undefined,
+    });
     if (result.clear_message_form) {
       if (result.intent === 'confirm') adjustGazeReliability('success');
       if (result.intent === 'cancel') adjustGazeReliability('cancel');
@@ -389,37 +400,64 @@ async function lockGazeTarget(node, zone, confidence) {
   if (node.classList.contains('contact')) {
     try {
       await api('select_contact', { contact_id: node.dataset.id });
+      selectedContactId = node.dataset.id;
+      selectedContactSource = 'gaze';
       document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
       node.classList.add('selected');
+      $('#message-result').innerHTML = '';
+      $('#gaze-feedback').textContent = `已确认选择：${label}。现在可提交模拟语音指令。`;
       toast(`已通过摄像头注视选择：${label}`);
     } catch (error) { toast(error.message); }
   }
 }
 
+function showContactGazeSuggestion(node, zone, confidence) {
+  const metadata = targetMetadata(node);
+  $('#message-result').innerHTML = `<div class="result-box gaze-suggestion"><strong>系统推测你正在看：${metadata.label}</strong><p>当前置信度 ${confidence.toFixed(2)}。是否选择该联系人？</p><button class="primary" id="confirm-gaze-contact">是，选择${metadata.label}</button><button class="secondary" id="reject-gaze-contact">不是，继续识别</button></div>`;
+  $('#confirm-gaze-contact').onclick = () => lockGazeTarget(node, zone, confidence);
+  $('#reject-gaze-contact').onclick = () => {
+    gazeSuggestionCooldownUntil = Date.now() + 3000;
+    clearGazeTarget();
+    $('#message-result').innerHTML = '';
+    $('#gaze-feedback').textContent = '已继续识别。请保持正对屏幕并注视目标联系人。';
+  };
+}
+
 function updateGazeTarget(prediction) {
   if (!prediction || calibrationActive) return;
-  const { zone, confidence } = prediction;
-  const candidates = eligibleGazeElements().filter((node) => elementZone(node) === zone);
-  if (confidence < 0.58 || candidates.length !== 1) {
+  const { zone, confidence, zoneScores } = prediction;
+  const rankedCandidates = eligibleGazeElements().map((node) => ({
+    node,
+    zone: elementZone(node),
+    score: zoneScores[elementZone(node)] || 0,
+  })).sort((left, right) => right.score - left.score);
+  const bestCandidate = rankedCandidates[0];
+  const secondCandidate = rankedCandidates[1];
+  if (!bestCandidate || bestCandidate.score < 0.16) {
     clearGazeTarget();
-    $('#gaze-feedback').textContent = candidates.length > 1
-      ? `当前 ${zone} 区域有 ${candidates.length} 个对象，无法可靠区分。`
-      : '当前注视置信度不足，请正对屏幕后重新校准或使用点击备用输入。';
+    $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
     return;
   }
-  const [closest] = candidates;
+  const { node: closest } = bestCandidate;
+  const candidateMargin = bestCandidate.score - (secondCandidate?.score || 0);
   if (gazeTargetElement !== closest) {
     clearGazeTarget();
     gazeTargetElement = closest;
     gazeTargetSince = performance.now();
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
-    $('#gaze-feedback').textContent = `候选注视：${label}（${zone} 区域，置信度 ${confidence.toFixed(2)}，停留约 1.5 秒确认）`;
+    $('#gaze-feedback').textContent = `候选注视：${label}（区域 ${bestCandidate.zone}，置信度 ${confidence.toFixed(2)}）`;
     return;
   }
-  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 1500) {
+  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 700) {
     gazeTargetLocked = true;
-    lockGazeTarget(closest, zone, confidence);
+    if (closest.classList.contains('contact')) {
+      if (Date.now() >= gazeSuggestionCooldownUntil) showContactGazeSuggestion(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
+    } else if (candidateMargin >= 0.06) {
+      lockGazeTarget(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
+    } else {
+      $('#gaze-feedback').textContent = `系统已找到多个接近候选，当前优先显示：${closest.querySelector('strong')?.textContent || '该对象'}。`;
+    }
   }
 }
 
@@ -631,6 +669,8 @@ function renderContacts() {
   document.querySelectorAll('.contact').forEach((node) => node.addEventListener('click', async () => {
     await api('select_contact', { contact_id: node.dataset.id });
     lastLockedGaze = undefined;
+    selectedContactId = node.dataset.id;
+    selectedContactSource = 'manual';
     document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
     node.classList.add('selected');
     toast(`已模拟注视：${node.querySelector('strong').textContent}`);
@@ -849,6 +889,8 @@ function bindEvents() {
 
 function resetMessageForm(message) {
   pendingMessage = undefined;
+  selectedContactId = undefined;
+  selectedContactSource = undefined;
   $('#message-content').value = '';
   $('#message-result').innerHTML = '';
   document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
