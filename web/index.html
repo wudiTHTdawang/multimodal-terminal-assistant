@@ -55,8 +55,13 @@
         <h2>给他发消息</h2>
         <p>页面右上角的全局摄像头可在一次授权后被消息、音乐和日程三个模块共用。第一阶段仅展示预览；下一阶段将把画面中的注视方向与当前页面内容对应。当前仍可点击联系人卡片作为备用演示输入。</p>
         <div class="card-grid" id="contacts"></div>
-        <label>消息内容<textarea id="message-content" placeholder="例如：晚点开会"></textarea></label>
-        <button class="primary" id="prepare-message">生成发送确认</button>
+        <label>模拟语音指令<textarea id="message-content" placeholder="例如：给他发消息，晚点开会"></textarea></label>
+        <div class="speech-presets">
+          <button class="secondary speech-preset" data-text="给他发消息，晚点开会">预设：给他发消息，晚点开会</button>
+          <button class="secondary speech-preset" data-text="确认发送">预设：确认发送</button>
+          <button class="secondary speech-preset" data-text="取消发送">预设：取消发送</button>
+        </div>
+        <button class="primary" id="prepare-message">提交模拟语音指令</button>
         <div class="result" id="message-result"></div>
       </section>
 

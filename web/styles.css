@@ -60,6 +60,8 @@ main { display: grid; grid-template-columns: 235px 1fr; min-height: calc(100vh -
 .muted { opacity: .43; pointer-events: none; }
 label { display: block; max-width: 720px; font-size: 14px; font-weight: 700; }
 textarea { display: block; width: 100%; height: 78px; padding: 11px; margin: 8px 0 15px; resize: vertical; border: 1px solid #cbd6ec; border-radius: 9px; font: inherit; }
+.speech-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: -5px 0 15px; }
+.speech-presets .secondary { margin-right: 0; font-size: 13px; }
 button.primary, button.secondary { padding: 11px 17px; cursor: pointer; border: 0; border-radius: 9px; font: inherit; font-weight: 700; }
 button.primary { color: #fff; background: #415fc0; }
 button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }

@@ -281,6 +281,42 @@ function recordScreenContext() {
   });
 }
 
+function renderMessageUnderstanding(result) {
+  const explanation = result.explanation?.length
+    ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
+  const actions = result.pending
+    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p>' : '';
+  $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
+  if (result.pending) {
+    pendingMessage = result.pending;
+    $('#confirm-send').onclick = async () => resetMessageForm((await api('confirm_send', pendingMessage)).message);
+    $('#cancel-send').onclick = async () => resetMessageForm((await api('cancel_message')).message);
+  }
+}
+
+async function submitSimulatedSpeech() {
+  const text = $('#message-content').value.trim();
+  if (!text) {
+    toast('请输入或选择一条模拟语音指令。');
+    return;
+  }
+  const timestamp = Date.now();
+  await recordBrowserEvent({
+    modality: 'speech_text',
+    timestamp_ms: timestamp,
+    confidence: 1,
+    payload: { text, page: 'message', source: 'simulated' },
+  });
+  try {
+    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    if (result.clear_message_form) {
+      resetMessageForm(result.message);
+      return;
+    }
+    renderMessageUnderstanding(result);
+  } catch (error) { toast(error.message); }
+}
+
 function distanceToRect(point, rect) {
   const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
   const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
@@ -754,15 +790,11 @@ function bindEvents() {
     void recordScreenContext();
   }));
 
-  $('#prepare-message').onclick = async () => {
-    try {
-      const result = await api('prepare_message', { content: $('#message-content').value });
-      pendingMessage = result.pending;
-      $('#message-result').innerHTML = `<div class="result-box">${result.message}<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p></div>`;
-      $('#confirm-send').onclick = async () => resetMessageForm((await api('confirm_send', pendingMessage)).message);
-      $('#cancel-send').onclick = async () => resetMessageForm((await api('cancel_message')).message);
-    } catch (error) { toast(error.message); }
-  };
+  $('#prepare-message').onclick = submitSimulatedSpeech;
+  document.querySelectorAll('.speech-preset').forEach((node) => node.onclick = () => {
+    $('#message-content').value = node.dataset.text;
+    $('#message-content').focus();
+  });
 
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
