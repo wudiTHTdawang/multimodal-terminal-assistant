@@ -18,12 +18,13 @@ let calibrationActive = false;
 let calibrationTimer;
 let calibrationSamples = [];
 let eyeFeatureHistory = [];
-let smoothedGazePoint;
+let lastLockedGaze;
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const FACE_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`;
 const FACE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/vision_bundle.mjs`;
+const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v3';
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 const CALIBRATION_POINTS = [
   { x: 0.16, y: 0.24 }, { x: 0.50, y: 0.24 }, { x: 0.84, y: 0.24 },
@@ -60,12 +61,35 @@ function setCameraStatus(message, status = 'idle') {
 function updateCameraControls(active) {
   $('#start-camera').disabled = active;
   $('#calibrate-gaze').disabled = !active;
+  $('#clear-gaze-calibration').disabled = !gazeMapper;
   $('#stop-camera').disabled = !active;
   $('#camera-panel').hidden = !active;
 }
 
 function setCameraContext(label) {
   $('#camera-context').textContent = `上下文：${label}`;
+}
+
+function loadGazeCalibration() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GAZE_CALIBRATION_STORAGE_KEY));
+    if (saved?.version === 3 && saved.prototypes && saved.zone_stats) return saved;
+  } catch { /* 本地校准损坏时忽略并要求重新校准。 */ }
+  return undefined;
+}
+
+function saveGazeCalibration() {
+  if (gazeMapper) localStorage.setItem(GAZE_CALIBRATION_STORAGE_KEY, JSON.stringify(gazeMapper));
+  updateCameraControls(Boolean(cameraStream));
+}
+
+function clearSavedGazeCalibration() {
+  localStorage.removeItem(GAZE_CALIBRATION_STORAGE_KEY);
+  gazeMapper = undefined;
+  previousGazeMapper = undefined;
+  clearGazeTarget();
+  updateCameraControls(Boolean(cameraStream));
+  $('#gaze-feedback').textContent = '已清除本机视线校准记录；下次使用请重新校准。';
 }
 
 function clearFaceOverlay() {
@@ -168,37 +192,32 @@ function solveLinearSystem(matrix, vector) {
 }
 
 function fitGazeMapper(samples) {
-  const width = samples[0].features.length + 1;
-  const normal = Array.from({ length: width }, () => Array(width).fill(0));
-  const targetX = Array(width).fill(0);
-  const targetY = Array(width).fill(0);
+  const prototypes = {};
   samples.forEach((sample) => {
-    const row = [1, ...sample.features];
-    row.forEach((left, i) => row.forEach((right, j) => { normal[i][j] += left * right; }));
-    row.forEach((value, i) => {
-      targetX[i] += value * sample.screenX;
-      targetY[i] += value * sample.screenY;
-    });
+    prototypes[gazeZone({ x: sample.screenX, y: sample.screenY })] = sample.features;
   });
-  // 小幅正则化避免少量校准误差导致系数剧烈波动。
-  normal.forEach((row, index) => { row[index] += 0.02; });
-  return { x: solveLinearSystem(normal, targetX), y: solveLinearSystem(normal, targetY) };
+  if (Object.keys(prototypes).length !== CALIBRATION_POINTS.length) {
+    throw new Error('校准区域不完整，请重新完成 9 点校准。');
+  }
+  return {
+    version: 3,
+    prototypes,
+    zone_stats: Object.fromEntries(Object.keys(prototypes).map((zone) => [zone, { reliability: 1, success: 0, cancel: 0 }])),
+    saved_at_ms: Date.now(),
+  };
 }
 
 function predictGazePoint(features) {
   if (!gazeMapper) return undefined;
-  const row = [1, ...features];
-  const dot = (weights) => weights.reduce((sum, value, index) => sum + value * row[index], 0);
-  const rawPoint = {
-    x: Math.max(0, Math.min(window.innerWidth, dot(gazeMapper.x))),
-    y: Math.max(0, Math.min(window.innerHeight, dot(gazeMapper.y))),
-  };
-  // 指数滑动平均：单帧偏差只影响一部分，减少高频跳动。
-  smoothedGazePoint = smoothedGazePoint ? {
-    x: smoothedGazePoint.x * 0.7 + rawPoint.x * 0.3,
-    y: smoothedGazePoint.y * 0.7 + rawPoint.y * 0.3,
-  } : rawPoint;
-  return smoothedGazePoint;
+  const ranked = Object.entries(gazeMapper.prototypes).map(([zone, prototype]) => ({
+    zone,
+    distance: Math.hypot(...features.map((value, index) => value - prototype[index])),
+  })).sort((left, right) => left.distance - right.distance);
+  const [best, second] = ranked;
+  if (!best || !second) return undefined;
+  const margin = Math.max(0, Math.min(1, (second.distance - best.distance) / Math.max(second.distance, 0.0001)));
+  const reliability = gazeMapper.zone_stats[best.zone]?.reliability ?? 1;
+  return { zone: best.zone, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)) };
 }
 
 function clearGazeTarget() {
@@ -208,6 +227,23 @@ function clearGazeTarget() {
   gazeTargetElement = undefined;
   gazeTargetLocked = false;
   gazeTargetSince = 0;
+}
+
+function adjustGazeReliability(outcome) {
+  if (!gazeMapper || !lastLockedGaze?.zone) return;
+  const stats = gazeMapper.zone_stats[lastLockedGaze.zone];
+  if (!stats) return;
+  if (outcome === 'success') {
+    stats.success += 1;
+    stats.reliability = Math.min(1.2, +(stats.reliability + 0.03).toFixed(3));
+    $('#gaze-feedback').textContent = `已记录本次视线选择成功，${lastLockedGaze.zone} 区域可靠度提升至 ${stats.reliability.toFixed(2)}。`;
+  } else {
+    stats.cancel += 1;
+    // 取消不一定由视线误判造成，因此只小幅降低可靠度。
+    stats.reliability = Math.max(0.7, +(stats.reliability - 0.02).toFixed(3));
+    $('#gaze-feedback').textContent = `已记录本次取消，${lastLockedGaze.zone} 区域可靠度微调至 ${stats.reliability.toFixed(2)}。`;
+  }
+  saveGazeCalibration();
 }
 
 function eligibleGazeElements() {
@@ -281,6 +317,12 @@ function recordScreenContext() {
   });
 }
 
+async function finishGazeSelectedMessage(action, outcome) {
+  const result = await api(action, pendingMessage);
+  adjustGazeReliability(outcome);
+  resetMessageForm(result.message);
+}
+
 function renderMessageUnderstanding(result) {
   const explanation = result.explanation?.length
     ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
@@ -289,8 +331,8 @@ function renderMessageUnderstanding(result) {
   $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
   if (result.pending) {
     pendingMessage = result.pending;
-    $('#confirm-send').onclick = async () => resetMessageForm((await api('confirm_send', pendingMessage)).message);
-    $('#cancel-send').onclick = async () => resetMessageForm((await api('cancel_message')).message);
+    $('#confirm-send').onclick = () => finishGazeSelectedMessage('confirm_send', 'success').catch((error) => toast(error.message));
+    $('#cancel-send').onclick = () => finishGazeSelectedMessage('cancel_message', 'cancel').catch((error) => toast(error.message));
   }
 }
 
@@ -310,6 +352,8 @@ async function submitSimulatedSpeech() {
   try {
     const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
     if (result.clear_message_form) {
+      if (result.intent === 'confirm') adjustGazeReliability('success');
+      if (result.intent === 'cancel') adjustGazeReliability('cancel');
       resetMessageForm(result.message);
       return;
     }
@@ -323,7 +367,7 @@ function distanceToRect(point, rect) {
   return Math.hypot(dx, dy);
 }
 
-async function lockGazeTarget(node, point, confidence) {
+async function lockGazeTarget(node, zone, confidence) {
   node.classList.add('gaze-focused');
   const metadata = targetMetadata(node);
   const label = metadata.label;
@@ -336,11 +380,12 @@ async function lockGazeTarget(node, point, confidence) {
       page: metadata.page,
       target_type: metadata.target_type,
       target_id: metadata.target_id,
-      zone: gazeZone(point),
+      zone,
       dwell_ms: Math.round(performance.now() - gazeTargetSince),
       calibration: '9-point-multi-frame-v2',
     },
   });
+  lastLockedGaze = { zone, target_id: metadata.target_id };
   if (node.classList.contains('contact')) {
     try {
       await api('select_contact', { contact_id: node.dataset.id });
@@ -351,37 +396,30 @@ async function lockGazeTarget(node, point, confidence) {
   }
 }
 
-function updateGazeTarget(point) {
-  if (!point || calibrationActive) return;
-  const zone = gazeZone(point);
+function updateGazeTarget(prediction) {
+  if (!prediction || calibrationActive) return;
+  const { zone, confidence } = prediction;
   const candidates = eligibleGazeElements().filter((node) => elementZone(node) === zone);
-  let closest;
-  let closestDistance = Infinity;
-  candidates.forEach((node) => {
-    const distance = distanceToRect(point, node.getBoundingClientRect());
-    if (distance < closestDistance) {
-      closest = node;
-      closestDistance = distance;
-    }
-  });
-  if (!closest || closestDistance > 92) {
+  if (confidence < 0.58 || candidates.length !== 1) {
     clearGazeTarget();
-    $('#gaze-feedback').textContent = '正在估计注视位置，请将视线停留在页面卡片上。';
+    $('#gaze-feedback').textContent = candidates.length > 1
+      ? `当前 ${zone} 区域有 ${candidates.length} 个对象，无法可靠区分。`
+      : '当前注视置信度不足，请正对屏幕后重新校准或使用点击备用输入。';
     return;
   }
+  const [closest] = candidates;
   if (gazeTargetElement !== closest) {
     clearGazeTarget();
     gazeTargetElement = closest;
     gazeTargetSince = performance.now();
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
-    $('#gaze-feedback').textContent = `候选注视：${label}（${zone} 区域，停留约 1.2 秒确认）`;
+    $('#gaze-feedback').textContent = `候选注视：${label}（${zone} 区域，置信度 ${confidence.toFixed(2)}，停留约 1.5 秒确认）`;
     return;
   }
-  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 1200) {
+  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 1500) {
     gazeTargetLocked = true;
-    const confidence = Math.max(0.55, Math.min(0.95, 1 - closestDistance / 220));
-    lockGazeTarget(closest, point, confidence);
+    lockGazeTarget(closest, zone, confidence);
   }
 }
 
@@ -407,7 +445,8 @@ function finishCalibration(success, message) {
   calibrationActive = false;
   $('#gaze-calibration').hidden = true;
   if (success) {
-    $('#gaze-feedback').textContent = '9 点校准完成。请注视页面中的卡片，停留约 1.2 秒。';
+    saveGazeCalibration();
+    $('#gaze-feedback').textContent = '9 点校准完成。请注视页面中的卡片，停留约 1.5 秒。';
     setCameraStatus('视线校准已完成，可识别当前页面注视对象', 'active');
   } else {
     gazeMapper = previousGazeMapper;
@@ -453,7 +492,6 @@ function startGazeCalibration() {
   }
   previousGazeMapper = gazeMapper;
   calibrationSamples = [];
-  smoothedGazePoint = undefined;
   calibrationActive = true;
   clearGazeTarget();
   $('#gaze-calibration').hidden = false;
@@ -574,8 +612,6 @@ function stopCamera(showMessage = true) {
   lastFacePresence = undefined;
   latestEyeFeatures = undefined;
   eyeFeatureHistory = [];
-  smoothedGazePoint = undefined;
-  gazeMapper = undefined;
   clearGazeTarget();
   clearFaceOverlay();
   if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
@@ -594,6 +630,7 @@ function renderContacts() {
     </button>`).join('');
   document.querySelectorAll('.contact').forEach((node) => node.addEventListener('click', async () => {
     await api('select_contact', { contact_id: node.dataset.id });
+    lastLockedGaze = undefined;
     document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
     node.classList.add('selected');
     toast(`已模拟注视：${node.querySelector('strong').textContent}`);
@@ -798,6 +835,7 @@ function bindEvents() {
 
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
+  $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
   $('#stop-camera').onclick = () => stopCamera();
   $('#cancel-calibration').onclick = () => finishCalibration(false, '已取消视线校准。');
 
@@ -819,6 +857,7 @@ function resetMessageForm(message) {
 
 async function init() {
   data = await (await fetch('/api/bootstrap')).json();
+  gazeMapper = loadGazeCalibration();
   $('#profile').innerHTML = data.profiles.map((profile) => `<option value="${profile.id}">${profile.display_name}</option>`).join('');
   if (data.state.authorized_sources?.length) {
     const names = data.state.authorized_sources.map((source) => source.display_name || source).join('、');
@@ -830,6 +869,7 @@ async function init() {
   renderGenres();
   bindEvents();
   updateCameraControls(false);
+  if (gazeMapper) $('#gaze-feedback').textContent = '已加载本机视线校准记录；如更换坐姿、摄像头或屏幕，请重新校准。';
   void recordScreenContext();
 }
 
