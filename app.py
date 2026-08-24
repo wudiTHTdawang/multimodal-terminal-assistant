@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import argparse
 import hashlib
+import time
+from threading import Lock
 from datetime import datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +19,10 @@ DATA_DIR = ROOT / "data"
 WEB_DIR = ROOT / "web"
 STATE_FILE = DATA_DIR / "runtime_state.json"
 AUTHORIZED_DIR = DATA_DIR / "authorized_memos"
+EVENT_TTL_MS = 10_000
+EVENT_BUFFER_LIMIT = 100
+MULTIMODAL_EVENT_BUFFER = []
+MULTIMODAL_EVENT_LOCK = Lock()
 
 
 def read_json(path: Path):
@@ -64,6 +70,63 @@ def save_state(state):
 def clear_active_music_mode(state):
     state["active_mode"] = None
     state["focus_mode"] = False
+
+
+def current_time_ms():
+    return int(time.time() * 1000)
+
+
+def recent_multimodal_events():
+    """返回仍在有效期内的结构化事件；事件仅存于进程内存。"""
+    now = current_time_ms()
+    with MULTIMODAL_EVENT_LOCK:
+        MULTIMODAL_EVENT_BUFFER[:] = [
+            item for item in MULTIMODAL_EVENT_BUFFER
+            if item["received_at_ms"] >= now - EVENT_TTL_MS
+        ]
+        return [item.copy() for item in MULTIMODAL_EVENT_BUFFER]
+
+
+def record_multimodal_event(event):
+    if not isinstance(event, dict):
+        raise ValueError("event 必须是对象。")
+    modality = str(event.get("modality", "")).strip()
+    if modality not in {"gaze", "screen_context", "speech_text"}:
+        raise ValueError("modality 仅支持 gaze、screen_context 或 speech_text。")
+    timestamp_ms = event.get("timestamp_ms")
+    if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+        raise ValueError("timestamp_ms 必须是正整数毫秒时间戳。")
+    confidence = event.get("confidence", 1.0)
+    if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        raise ValueError("confidence 必须在 0 到 1 之间。")
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("payload 必须是对象。")
+    if modality == "gaze":
+        required = {"page", "target_type", "target_id", "zone", "dwell_ms"}
+        if not required.issubset(payload):
+            raise ValueError("gaze 事件缺少页面、目标、区域或停留时长字段。")
+        if not isinstance(payload["dwell_ms"], int) or payload["dwell_ms"] < 0:
+            raise ValueError("dwell_ms 必须是非负整数。")
+    if modality == "speech_text" and not str(payload.get("text", "")).strip():
+        raise ValueError("speech_text 事件必须包含非空 text。")
+
+    received_at_ms = current_time_ms()
+    stored = {
+        "modality": modality,
+        "timestamp_ms": timestamp_ms,
+        "confidence": round(float(confidence), 3),
+        "payload": payload,
+        "received_at_ms": received_at_ms,
+    }
+    with MULTIMODAL_EVENT_LOCK:
+        MULTIMODAL_EVENT_BUFFER[:] = [
+            item for item in MULTIMODAL_EVENT_BUFFER
+            if item["received_at_ms"] >= received_at_ms - EVENT_TTL_MS
+        ]
+        MULTIMODAL_EVENT_BUFFER.append(stored)
+        del MULTIMODAL_EVENT_BUFFER[:-EVENT_BUFFER_LIMIT]
+    return {"message": "已在本地短时缓存中记录多模态事件。", "event": stored}
 
 
 def choose_track(genre: str, exclude_id: str | None = None):
@@ -216,6 +279,13 @@ class AssistantHandler(SimpleHTTPRequestHandler):
     def handle_action(self, payload):
         action = payload["action"]
         state = load_state()
+
+        if action == "record_multimodal_event":
+            return record_multimodal_event(payload.get("event"))
+
+        if action == "get_recent_multimodal_events":
+            events = recent_multimodal_events()
+            return {"message": "已读取本地短时多模态事件。", "events": events}
 
         if action == "select_contact":
             state["selected_contact"] = payload["contact_id"]

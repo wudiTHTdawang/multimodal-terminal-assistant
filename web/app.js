@@ -17,6 +17,8 @@ let gazeTargetLocked = false;
 let calibrationActive = false;
 let calibrationTimer;
 let calibrationSamples = [];
+let eyeFeatureHistory = [];
+let smoothedGazePoint;
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -24,8 +26,9 @@ const FACE_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FA
 const FACE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/vision_bundle.mjs`;
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 const CALIBRATION_POINTS = [
-  { x: 0.18, y: 0.27 }, { x: 0.82, y: 0.27 }, { x: 0.50, y: 0.52 },
-  { x: 0.18, y: 0.77 }, { x: 0.82, y: 0.77 },
+  { x: 0.16, y: 0.24 }, { x: 0.50, y: 0.24 }, { x: 0.84, y: 0.24 },
+  { x: 0.16, y: 0.52 }, { x: 0.50, y: 0.52 }, { x: 0.84, y: 0.52 },
+  { x: 0.16, y: 0.80 }, { x: 0.50, y: 0.80 }, { x: 0.84, y: 0.80 },
 ];
 
 const $ = (selector) => document.querySelector(selector);
@@ -127,7 +130,20 @@ function normalizedIrisPosition(landmarks, irisIndexes, eyeIndexes) {
 function extractEyeFeatures(landmarks) {
   const left = normalizedIrisPosition(landmarks, [468, 469, 470, 471, 472], [33, 133, 159, 145]);
   const right = normalizedIrisPosition(landmarks, [473, 474, 475, 476, 477], [362, 263, 386, 374]);
-  return left && right ? [...left, ...right] : undefined;
+  const nose = landmarks[1];
+  const xValues = landmarks.map((point) => point.x);
+  const yValues = landmarks.map((point) => point.y);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
+  if (!left || !right || !nose || maxX - minX < 0.01 || maxY - minY < 0.01) return undefined;
+  return [
+    ...left,
+    ...right,
+    (nose.x - minX) / (maxX - minX),
+    (nose.y - minY) / (maxY - minY),
+  ];
 }
 
 function solveLinearSystem(matrix, vector) {
@@ -164,7 +180,8 @@ function fitGazeMapper(samples) {
       targetY[i] += value * sample.screenY;
     });
   });
-  normal.forEach((row, index) => { row[index] += 0.0001; });
+  // 小幅正则化避免少量校准误差导致系数剧烈波动。
+  normal.forEach((row, index) => { row[index] += 0.02; });
   return { x: solveLinearSystem(normal, targetX), y: solveLinearSystem(normal, targetY) };
 }
 
@@ -172,10 +189,16 @@ function predictGazePoint(features) {
   if (!gazeMapper) return undefined;
   const row = [1, ...features];
   const dot = (weights) => weights.reduce((sum, value, index) => sum + value * row[index], 0);
-  return {
+  const rawPoint = {
     x: Math.max(0, Math.min(window.innerWidth, dot(gazeMapper.x))),
     y: Math.max(0, Math.min(window.innerHeight, dot(gazeMapper.y))),
   };
+  // 指数滑动平均：单帧偏差只影响一部分，减少高频跳动。
+  smoothedGazePoint = smoothedGazePoint ? {
+    x: smoothedGazePoint.x * 0.7 + rawPoint.x * 0.3,
+    y: smoothedGazePoint.y * 0.7 + rawPoint.y * 0.3,
+  } : rawPoint;
+  return smoothedGazePoint;
 }
 
 function clearGazeTarget() {
@@ -196,16 +219,76 @@ function eligibleGazeElements() {
   });
 }
 
+function gazeZone(point) {
+  const column = point.x < window.innerWidth / 3 ? 'left' : point.x < window.innerWidth * 2 / 3 ? 'center' : 'right';
+  const row = point.y < window.innerHeight / 3 ? 'top' : point.y < window.innerHeight * 2 / 3 ? 'middle' : 'bottom';
+  return `${row}-${column}`;
+}
+
+function elementZone(node) {
+  const rect = node.getBoundingClientRect();
+  return gazeZone({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+}
+
+function targetMetadata(node) {
+  const page = document.querySelector('.page.active')?.id.replace('-page', '') || 'unknown';
+  const isSchedule = node.classList.contains('schedule-item');
+  const label = node.querySelector('strong')?.textContent || node.querySelector('.schedule-title')?.textContent || '当前项目';
+  return {
+    page,
+    target_type: isSchedule ? 'schedule_item' : page === 'music' ? 'music_genre' : 'contact',
+    target_id: node.dataset.id || node.querySelector('[data-event-key]')?.dataset.eventKey || node.dataset.genre || label,
+    label,
+  };
+}
+
+async function recordBrowserEvent(event) {
+  try {
+    await api('record_multimodal_event', { event });
+  } catch (error) {
+    // 结构化事件失败不阻断本地交互，但会让开发者在控制台看到明确原因。
+    console.warn('多模态事件未记录：', error.message);
+  }
+}
+
+function recordScreenContext() {
+  const page = document.querySelector('.page.active')?.id.replace('-page', '') || 'unknown';
+  const visibleTargets = eligibleGazeElements().map((node) => ({
+    ...targetMetadata(node),
+    zone: elementZone(node),
+  }));
+  return recordBrowserEvent({
+    modality: 'screen_context',
+    timestamp_ms: Date.now(),
+    confidence: 1,
+    payload: { page, visible_targets: visibleTargets },
+  });
+}
+
 function distanceToRect(point, rect) {
   const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
   const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
   return Math.hypot(dx, dy);
 }
 
-async function lockGazeTarget(node) {
+async function lockGazeTarget(node, point, confidence) {
   node.classList.add('gaze-focused');
-  const label = node.querySelector('strong')?.textContent || node.querySelector('.schedule-title')?.textContent || '当前项目';
+  const metadata = targetMetadata(node);
+  const label = metadata.label;
   $('#gaze-feedback').textContent = `已持续注视：${label}`;
+  await recordBrowserEvent({
+    modality: 'gaze',
+    timestamp_ms: Date.now(),
+    confidence,
+    payload: {
+      page: metadata.page,
+      target_type: metadata.target_type,
+      target_id: metadata.target_id,
+      zone: gazeZone(point),
+      dwell_ms: Math.round(performance.now() - gazeTargetSince),
+      calibration: '9-point-multi-frame-v2',
+    },
+  });
   if (node.classList.contains('contact')) {
     try {
       await api('select_contact', { contact_id: node.dataset.id });
@@ -218,7 +301,8 @@ async function lockGazeTarget(node) {
 
 function updateGazeTarget(point) {
   if (!point || calibrationActive) return;
-  const candidates = eligibleGazeElements();
+  const zone = gazeZone(point);
+  const candidates = eligibleGazeElements().filter((node) => elementZone(node) === zone);
   let closest;
   let closestDistance = Infinity;
   candidates.forEach((node) => {
@@ -228,7 +312,7 @@ function updateGazeTarget(point) {
       closestDistance = distance;
     }
   });
-  if (!closest || closestDistance > 68) {
+  if (!closest || closestDistance > 92) {
     clearGazeTarget();
     $('#gaze-feedback').textContent = '正在估计注视位置，请将视线停留在页面卡片上。';
     return;
@@ -239,12 +323,13 @@ function updateGazeTarget(point) {
     gazeTargetSince = performance.now();
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
-    $('#gaze-feedback').textContent = `候选注视：${label}（停留约 0.8 秒确认）`;
+    $('#gaze-feedback').textContent = `候选注视：${label}（${zone} 区域，停留约 1.2 秒确认）`;
     return;
   }
-  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 800) {
+  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 1200) {
     gazeTargetLocked = true;
-    lockGazeTarget(closest);
+    const confidence = Math.max(0.55, Math.min(0.95, 1 - closestDistance / 220));
+    lockGazeTarget(closest, point, confidence);
   }
 }
 
@@ -254,12 +339,23 @@ function updateCalibrationPoint(point) {
   target.style.top = `${point.y * 100}vh`;
 }
 
+function median(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function medianEyeFeatures() {
+  if (eyeFeatureHistory.length < 6) return undefined;
+  return eyeFeatureHistory[0].map((_, index) => median(eyeFeatureHistory.map((sample) => sample[index])));
+}
+
 function finishCalibration(success, message) {
   clearTimeout(calibrationTimer);
   calibrationActive = false;
   $('#gaze-calibration').hidden = true;
   if (success) {
-    $('#gaze-feedback').textContent = '校准完成。请注视页面中的卡片，停留约 0.8 秒。';
+    $('#gaze-feedback').textContent = '9 点校准完成。请注视页面中的卡片，停留约 1.2 秒。';
     setCameraStatus('视线校准已完成，可识别当前页面注视对象', 'active');
   } else {
     gazeMapper = previousGazeMapper;
@@ -279,21 +375,23 @@ function runCalibrationStep(index) {
     return;
   }
   const point = CALIBRATION_POINTS[index];
+  eyeFeatureHistory = [];
   updateCalibrationPoint(point);
   $('#calibration-instruction').textContent = `请持续注视蓝点。正在采集第 ${index + 1} / ${CALIBRATION_POINTS.length} 个位置…`;
   calibrationTimer = window.setTimeout(() => {
-    if (!latestEyeFeatures) {
+    const features = medianEyeFeatures();
+    if (!features) {
       $('#calibration-instruction').textContent = '没有检测到眼部关键点，请正对摄像头后保持注视。将重新采集此位置…';
       calibrationTimer = window.setTimeout(() => runCalibrationStep(index), 1300);
       return;
     }
     calibrationSamples.push({
-      features: [...latestEyeFeatures],
+      features,
       screenX: window.innerWidth * point.x,
       screenY: window.innerHeight * point.y,
     });
     calibrationTimer = window.setTimeout(() => runCalibrationStep(index + 1), 650);
-  }, 2200);
+  }, 2600);
 }
 
 function startGazeCalibration() {
@@ -303,6 +401,7 @@ function startGazeCalibration() {
   }
   previousGazeMapper = gazeMapper;
   calibrationSamples = [];
+  smoothedGazePoint = undefined;
   calibrationActive = true;
   clearGazeTarget();
   $('#gaze-calibration').hidden = false;
@@ -345,9 +444,14 @@ function runFaceDetection() {
       if (landmarks) {
         drawFaceLandmarks(landmarks);
         latestEyeFeatures = extractEyeFeatures(landmarks);
-        if (gazeMapper && latestEyeFeatures) updateGazeTarget(predictGazePoint(latestEyeFeatures));
+        if (latestEyeFeatures) {
+          eyeFeatureHistory.push([...latestEyeFeatures]);
+          eyeFeatureHistory = eyeFeatureHistory.slice(-24);
+          if (gazeMapper) updateGazeTarget(predictGazePoint(latestEyeFeatures));
+        } else clearGazeTarget();
       } else {
         latestEyeFeatures = undefined;
+        eyeFeatureHistory = [];
         clearFaceOverlay();
         clearGazeTarget();
       }
@@ -417,6 +521,8 @@ function stopCamera(showMessage = true) {
   faceDetectionFrame = undefined;
   lastFacePresence = undefined;
   latestEyeFeatures = undefined;
+  eyeFeatureHistory = [];
+  smoothedGazePoint = undefined;
   gazeMapper = undefined;
   clearGazeTarget();
   clearFaceOverlay();
@@ -583,6 +689,7 @@ function showSchedule(result) {
       }
     });
   });
+  void recordScreenContext();
 }
 
 function readTextFile(file) {
@@ -628,6 +735,7 @@ function bindEvents() {
     node.classList.add('active');
     $(`#${node.dataset.page}-page`).classList.add('active');
     setCameraContext(node.textContent.trim());
+    void recordScreenContext();
   }));
 
   $('#prepare-message').onclick = async () => {
@@ -674,6 +782,7 @@ async function init() {
   renderGenres();
   bindEvents();
   updateCameraControls(false);
+  void recordScreenContext();
 }
 
 init().catch((error) => toast(`初始化失败：${error.message}`));
