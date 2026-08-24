@@ -3,6 +3,41 @@ let pendingMessage;
 let currentTrack;
 let activeMode;
 let switchArmed = false;
+let cameraStream;
+let faceLandmarker;
+let faceDetectionFrame;
+let lastFaceDetectionAt = 0;
+let lastFacePresence;
+let latestEyeFeatures;
+let gazeMapper;
+let previousGazeMapper;
+let gazeTargetElement;
+let gazeTargetSince = 0;
+let gazeTargetLocked = false;
+let calibrationActive = false;
+let calibrationTimer;
+let calibrationSamples = [];
+let eyeFeatureHistory = [];
+let lastLockedGaze;
+let gazeSuggestionCooldownUntil = 0;
+let selectedContactId;
+let selectedContactSource;
+let pendingGazeSuggestion;
+let headMotionHistory = [];
+let lastHeadGestureAt = 0;
+let messageDecisionInProgress = false;
+
+const FACE_TASK_VERSION = '1.0.1';
+const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const FACE_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`;
+const FACE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/vision_bundle.mjs`;
+const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v3';
+const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
+const CALIBRATION_POINTS = [
+  { x: 0.16, y: 0.24 }, { x: 0.50, y: 0.24 }, { x: 0.84, y: 0.24 },
+  { x: 0.16, y: 0.52 }, { x: 0.50, y: 0.52 }, { x: 0.84, y: 0.52 },
+  { x: 0.16, y: 0.80 }, { x: 0.50, y: 0.80 }, { x: 0.84, y: 0.80 },
+];
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -24,16 +59,769 @@ function toast(message) {
   window.setTimeout(() => node.classList.remove('show'), 2400);
 }
 
+function setCameraStatus(message, status = 'idle') {
+  const node = $('#camera-status');
+  node.textContent = message;
+  node.dataset.status = status;
+}
+
+function updateCameraControls(active) {
+  $('#start-camera').disabled = active;
+  $('#calibrate-gaze').disabled = !active;
+  $('#clear-gaze-calibration').disabled = !gazeMapper;
+  $('#stop-camera').disabled = !active;
+  $('#camera-panel').hidden = !active;
+}
+
+function setCameraContext(label) {
+  $('#camera-context').textContent = `上下文：${label}`;
+}
+
+function loadGazeCalibration() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GAZE_CALIBRATION_STORAGE_KEY));
+    if (saved?.version === 3 && saved.prototypes && saved.zone_stats) return saved;
+  } catch { /* 本地校准损坏时忽略并要求重新校准。 */ }
+  return undefined;
+}
+
+function saveGazeCalibration() {
+  if (gazeMapper) localStorage.setItem(GAZE_CALIBRATION_STORAGE_KEY, JSON.stringify(gazeMapper));
+  updateCameraControls(Boolean(cameraStream));
+}
+
+function clearSavedGazeCalibration() {
+  localStorage.removeItem(GAZE_CALIBRATION_STORAGE_KEY);
+  gazeMapper = undefined;
+  previousGazeMapper = undefined;
+  clearGazeTarget();
+  updateCameraControls(Boolean(cameraStream));
+  $('#gaze-feedback').textContent = '已清除本机视线校准记录；下次使用请重新校准。';
+}
+
+function clearFaceOverlay() {
+  const canvas = $('#face-overlay');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawFaceLandmarks(landmarks) {
+  const video = $('#camera-preview');
+  const canvas = $('#face-overlay');
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+  const context = canvas.getContext('2d');
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  const xValues = landmarks.map((point) => point.x * canvas.width);
+  const yValues = landmarks.map((point) => point.y * canvas.height);
+  const left = Math.min(...xValues);
+  const top = Math.min(...yValues);
+  const width = Math.max(...xValues) - left;
+  const height = Math.max(...yValues) - top;
+  context.strokeStyle = '#62e0a1';
+  context.lineWidth = Math.max(2, canvas.width / 250);
+  context.strokeRect(left, top, width, height);
+
+  context.fillStyle = '#bfffe0';
+  const radius = Math.max(1.8, canvas.width / 280);
+  EYE_LANDMARKS.forEach((index) => {
+    const point = landmarks[index];
+    if (!point) return;
+    context.beginPath();
+    context.arc(point.x * canvas.width, point.y * canvas.height, radius, 0, Math.PI * 2);
+    context.fill();
+  });
+}
+
+function meanLandmark(landmarks, indexes) {
+  const points = indexes.map((index) => landmarks[index]).filter(Boolean);
+  if (!points.length) return undefined;
+  return {
+    x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+    y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+  };
+}
+
+function normalizedIrisPosition(landmarks, irisIndexes, eyeIndexes) {
+  const iris = meanLandmark(landmarks, irisIndexes);
+  const eye = eyeIndexes.map((index) => landmarks[index]).filter(Boolean);
+  if (!iris || eye.length !== eyeIndexes.length) return undefined;
+  const xValues = eye.map((point) => point.x);
+  const yValues = eye.map((point) => point.y);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
+  if (maxX - minX < 0.002 || maxY - minY < 0.002) return undefined;
+  return [(iris.x - minX) / (maxX - minX), (iris.y - minY) / (maxY - minY)];
+}
+
+function extractEyeFeatures(landmarks) {
+  const left = normalizedIrisPosition(landmarks, [468, 469, 470, 471, 472], [33, 133, 159, 145]);
+  const right = normalizedIrisPosition(landmarks, [473, 474, 475, 476, 477], [362, 263, 386, 374]);
+  const nose = landmarks[1];
+  const xValues = landmarks.map((point) => point.x);
+  const yValues = landmarks.map((point) => point.y);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
+  if (!left || !right || !nose || maxX - minX < 0.01 || maxY - minY < 0.01) return undefined;
+  return [
+    ...left,
+    ...right,
+    (nose.x - minX) / (maxX - minX),
+    (nose.y - minY) / (maxY - minY),
+  ];
+}
+
+function solveLinearSystem(matrix, vector) {
+  const size = vector.length;
+  const augmented = matrix.map((row, index) => [...row, vector[index]]);
+  for (let pivot = 0; pivot < size; pivot += 1) {
+    let bestRow = pivot;
+    for (let row = pivot + 1; row < size; row += 1) {
+      if (Math.abs(augmented[row][pivot]) > Math.abs(augmented[bestRow][pivot])) bestRow = row;
+    }
+    if (Math.abs(augmented[bestRow][pivot]) < 1e-8) throw new Error('校准数据差异不足，请保持正对屏幕后重新校准。');
+    [augmented[pivot], augmented[bestRow]] = [augmented[bestRow], augmented[pivot]];
+    const divisor = augmented[pivot][pivot];
+    for (let column = pivot; column <= size; column += 1) augmented[pivot][column] /= divisor;
+    for (let row = 0; row < size; row += 1) {
+      if (row === pivot) continue;
+      const factor = augmented[row][pivot];
+      for (let column = pivot; column <= size; column += 1) augmented[row][column] -= factor * augmented[pivot][column];
+    }
+  }
+  return augmented.map((row) => row[size]);
+}
+
+function fitGazeMapper(samples) {
+  const prototypes = {};
+  samples.forEach((sample) => {
+    prototypes[gazeZone({ x: sample.screenX, y: sample.screenY })] = sample.features;
+  });
+  if (Object.keys(prototypes).length !== CALIBRATION_POINTS.length) {
+    throw new Error('校准区域不完整，请重新完成 9 点校准。');
+  }
+  return {
+    version: 3,
+    prototypes,
+    zone_stats: Object.fromEntries(Object.keys(prototypes).map((zone) => [zone, { reliability: 1, success: 0, cancel: 0 }])),
+    saved_at_ms: Date.now(),
+  };
+}
+
+function predictGazePoint(features) {
+  if (!gazeMapper) return undefined;
+  const ranked = Object.entries(gazeMapper.prototypes).map(([zone, prototype]) => ({
+    zone,
+    distance: Math.hypot(...features.map((value, index) => value - prototype[index])),
+  })).sort((left, right) => left.distance - right.distance);
+  const [best, second] = ranked;
+  if (!best || !second) return undefined;
+  const margin = Math.max(0, Math.min(1, (second.distance - best.distance) / Math.max(second.distance, 0.0001)));
+  const reliability = gazeMapper.zone_stats[best.zone]?.reliability ?? 1;
+  const maxDistance = Math.max(...ranked.map((item) => item.distance), 0.0001);
+  const zoneScores = Object.fromEntries(ranked.map((item) => [
+    item.zone,
+    Math.max(0.05, (1 - item.distance / maxDistance) * (gazeMapper.zone_stats[item.zone]?.reliability ?? 1)),
+  ]));
+  return { zone: best.zone, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)), zoneScores };
+}
+
+function clearGazeTarget() {
+  document.querySelectorAll('.gaze-candidate, .gaze-focused').forEach((node) => {
+    node.classList.remove('gaze-candidate', 'gaze-focused');
+  });
+  gazeTargetElement = undefined;
+  gazeTargetLocked = false;
+  gazeTargetSince = 0;
+}
+
+function clearGazeSuggestion() {
+  document.querySelector('.contact-gaze-prompt')?.remove();
+  pendingGazeSuggestion = undefined;
+  headMotionHistory = [];
+}
+
+function adjustGazeReliability(outcome) {
+  if (!gazeMapper || !lastLockedGaze?.zone) return;
+  const stats = gazeMapper.zone_stats[lastLockedGaze.zone];
+  if (!stats) return;
+  if (outcome === 'success') {
+    stats.success += 1;
+    stats.reliability = Math.min(1.2, +(stats.reliability + 0.03).toFixed(3));
+    $('#gaze-feedback').textContent = `已记录本次视线选择成功，${lastLockedGaze.zone} 区域可靠度提升至 ${stats.reliability.toFixed(2)}。`;
+  } else {
+    stats.cancel += 1;
+    // 取消不一定由视线误判造成，因此只小幅降低可靠度。
+    stats.reliability = Math.max(0.7, +(stats.reliability - 0.02).toFixed(3));
+    $('#gaze-feedback').textContent = `已记录本次取消，${lastLockedGaze.zone} 区域可靠度微调至 ${stats.reliability.toFixed(2)}。`;
+  }
+  saveGazeCalibration();
+}
+
+function eligibleGazeElements() {
+  const activePage = document.querySelector('.page.active')?.id;
+  const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.genre' : '.schedule-item';
+  return [...document.querySelectorAll(selector)].filter((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+}
+
+function gazeZone(point) {
+  const column = point.x < window.innerWidth / 3 ? 'left' : point.x < window.innerWidth * 2 / 3 ? 'center' : 'right';
+  const row = point.y < window.innerHeight / 3 ? 'top' : point.y < window.innerHeight * 2 / 3 ? 'middle' : 'bottom';
+  return `${row}-${column}`;
+}
+
+function elementZone(node) {
+  const rect = node.getBoundingClientRect();
+  return gazeZone({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+}
+
+function targetMetadata(node) {
+  const page = document.querySelector('.page.active')?.id.replace('-page', '') || 'unknown';
+  const isSchedule = node.classList.contains('schedule-item');
+  const label = node.querySelector('strong')?.textContent || node.querySelector('.schedule-title')?.textContent || '当前项目';
+  return {
+    page,
+    target_type: isSchedule ? 'schedule_item' : page === 'music' ? 'music_genre' : 'contact',
+    target_id: node.dataset.id || node.querySelector('[data-event-key]')?.dataset.eventKey || node.dataset.genre || label,
+    label,
+  };
+}
+
+function validateBrowserEvent(event) {
+  if (!['gaze', 'screen_context', 'speech_text', 'head_gesture'].includes(event?.modality)) {
+    throw new Error('浏览器事件模态不合法。');
+  }
+  if (!Number.isInteger(event.timestamp_ms) || event.timestamp_ms <= 0) {
+    throw new Error('浏览器事件缺少毫秒时间戳。');
+  }
+  if (typeof event.confidence !== 'number' || event.confidence < 0 || event.confidence > 1) {
+    throw new Error('浏览器事件置信度不在 0 到 1 之间。');
+  }
+  if (!event.payload || typeof event.payload !== 'object') {
+    throw new Error('浏览器事件缺少 payload。');
+  }
+  if (event.modality === 'head_gesture' && (event.payload.page !== 'message' || !['confirm', 'reject'].includes(event.payload.decision))) {
+    throw new Error('头部确认事件缺少消息页或确认结果。');
+  }
+}
+
+async function recordBrowserEvent(event) {
+  try {
+    validateBrowserEvent(event);
+    await api('record_multimodal_event', { event });
+  } catch (error) {
+    // 结构化事件失败不阻断本地交互，但会让开发者在控制台看到明确原因。
+    console.warn('多模态事件未记录：', error.message);
+  }
+}
+
+function recordScreenContext() {
+  const page = document.querySelector('.page.active')?.id.replace('-page', '') || 'unknown';
+  const visibleTargets = eligibleGazeElements().map((node) => ({
+    ...targetMetadata(node),
+    zone: elementZone(node),
+  }));
+  return recordBrowserEvent({
+    modality: 'screen_context',
+    timestamp_ms: Date.now(),
+    confidence: 1,
+    payload: { page, visible_targets: visibleTargets },
+  });
+}
+
+async function recordHeadDecision(decision, purpose) {
+  await recordBrowserEvent({
+    modality: 'head_gesture',
+    timestamp_ms: Date.now(),
+    confidence: 0.72,
+    payload: { page: 'message', decision, gesture: decision === 'confirm' ? 'nod' : 'shake', purpose },
+  });
+}
+
+async function finishMessageDecision(action, outcome, source = 'button') {
+  if (!pendingMessage || messageDecisionInProgress) return;
+  messageDecisionInProgress = true;
+  try {
+    if (source === 'head') await recordHeadDecision(outcome === 'success' ? 'confirm' : 'reject', 'message_confirmation');
+    const result = await api(action, pendingMessage);
+    adjustGazeReliability(outcome);
+    resetMessageForm(result.message);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    messageDecisionInProgress = false;
+  }
+}
+
+function renderMessageUnderstanding(result) {
+  const explanation = result.explanation?.length
+    ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
+  const actions = result.pending
+    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
+  $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
+  if (result.pending) {
+    pendingMessage = result.pending;
+    $('#confirm-send').onclick = () => finishMessageDecision('confirm_send', 'success');
+    $('#cancel-send').onclick = () => finishMessageDecision('cancel_message', 'cancel');
+  }
+}
+
+async function submitSimulatedSpeech() {
+  const text = $('#message-content').value.trim();
+  if (!text) {
+    toast('请输入或选择一条模拟语音指令。');
+    return;
+  }
+
+  // 联系人候选出现时，优先将简短的“是 / 不用”视为对候选的回答，
+  // 而不是一条新的消息发送指令。
+  if (pendingGazeSuggestion) {
+    const decision = parseContactSuggestionSpeech(text);
+    if (decision === 'confirm') {
+      const suggestion = pendingGazeSuggestion;
+      clearGazeSuggestion();
+      $('#message-content').value = '';
+      await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+      return;
+    }
+    if (decision === 'reject') {
+      rejectGazeSuggestion();
+      $('#message-content').value = '';
+      return;
+    }
+    toast('可以说“是”或“不用”，也可以点头或摇头。');
+    return;
+  }
+
+  const timestamp = Date.now();
+  const isMessageDecision = Boolean(pendingMessage);
+  if (isMessageDecision) messageDecisionInProgress = true;
+  try {
+    await recordBrowserEvent({
+      modality: 'speech_text',
+      timestamp_ms: timestamp,
+      confidence: 1,
+      payload: { text, page: 'message', source: 'simulated' },
+    });
+    const result = await api('understand_multimodal_command', {
+      speech_timestamp_ms: timestamp,
+      preferred_contact_id: selectedContactSource === 'manual' ? selectedContactId : undefined,
+    });
+    if (result.clear_message_form) {
+      if (result.intent === 'confirm') adjustGazeReliability('success');
+      if (result.intent === 'cancel') adjustGazeReliability('cancel');
+      resetMessageForm(result.message);
+      return;
+    }
+    renderMessageUnderstanding(result);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    if (isMessageDecision) messageDecisionInProgress = false;
+  }
+}
+
+function distanceToRect(point, rect) {
+  const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
+  const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
+  return Math.hypot(dx, dy);
+}
+
+async function lockGazeTarget(node, zone, confidence) {
+  clearGazeSuggestion();
+  node.classList.add('gaze-focused');
+  const metadata = targetMetadata(node);
+  const label = metadata.label;
+  const isContact = node.classList.contains('contact');
+  if (isContact) {
+    // 先锁定本轮联系人，避免等待事件写入或接口响应时又弹出新的候选提示。
+    selectedContactId = node.dataset.id;
+    selectedContactSource = 'gaze';
+  }
+  $('#gaze-feedback').textContent = `已持续注视：${label}`;
+  await recordBrowserEvent({
+    modality: 'gaze',
+    timestamp_ms: Date.now(),
+    confidence,
+    payload: {
+      page: metadata.page,
+      target_type: metadata.target_type,
+      target_id: metadata.target_id,
+      zone,
+      dwell_ms: Math.round(performance.now() - gazeTargetSince),
+      calibration: '9-point-multi-frame-v2',
+    },
+  });
+  lastLockedGaze = { zone, target_id: metadata.target_id };
+  if (isContact) {
+    try {
+      await api('select_contact', { contact_id: node.dataset.id });
+      document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
+      node.classList.add('selected');
+      $('#message-result').innerHTML = '';
+      $('#gaze-feedback').textContent = `已确认选择：${label}。现在可提交模拟语音指令。`;
+      toast(`已通过摄像头注视选择：${label}`);
+    } catch (error) {
+      selectedContactId = undefined;
+      selectedContactSource = undefined;
+      toast(error.message);
+    }
+  }
+}
+
+function parseContactSuggestionSpeech(text) {
+  const normalized = text.replace(/[，。！？、\s]/g, '').toLowerCase();
+  if (/^(是|是的|好的|好|确认|选中|选择|帮我选|可以)$/.test(normalized)) return 'confirm';
+  if (/^(不|不是|不用|暂不|取消|继续识别|不要)$/.test(normalized)) return 'reject';
+  return undefined;
+}
+
+function positionGazePrompt(prompt, node) {
+  const rect = node.getBoundingClientRect();
+  const width = 250;
+  const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+  const top = Math.min(rect.bottom + 8, window.innerHeight - 132);
+  prompt.style.left = `${left}px`;
+  prompt.style.top = `${Math.max(12, top)}px`;
+}
+
+function rejectGazeSuggestion() {
+  gazeSuggestionCooldownUntil = Date.now() + 3000;
+  clearGazeSuggestion();
+  clearGazeTarget();
+  $('#gaze-feedback').textContent = '好的，我会继续留意你的注视。';
+}
+
+function showContactGazeSuggestion(node, zone, confidence) {
+  if (selectedContactId || pendingMessage || pendingGazeSuggestion) return;
+  const metadata = targetMetadata(node);
+  const prompt = document.createElement('section');
+  prompt.className = 'contact-gaze-prompt';
+  prompt.innerHTML = `<strong>看起来你想联系 ${metadata.label}</strong><p>需要我帮你选中这位联系人吗？</p><div><button class="primary" data-decision="confirm">选中</button><button class="secondary" data-decision="reject">暂不</button></div><small>也可说“是”或“不用”，或点头 / 摇头。</small>`;
+  document.body.append(prompt);
+  positionGazePrompt(prompt, node);
+  pendingGazeSuggestion = { node, zone, confidence };
+  headMotionHistory = [];
+  prompt.querySelector('[data-decision="confirm"]').onclick = async () => {
+    const suggestion = pendingGazeSuggestion;
+    clearGazeSuggestion();
+    if (suggestion) await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+  };
+  prompt.querySelector('[data-decision="reject"]').onclick = rejectGazeSuggestion;
+}
+
+function updateGazeTarget(prediction) {
+  // 已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
+  if (selectedContactId || pendingMessage) {
+    clearGazeTarget();
+    return;
+  }
+  if (!prediction || calibrationActive || pendingGazeSuggestion) return;
+  const { zone, confidence, zoneScores } = prediction;
+  const rankedCandidates = eligibleGazeElements().map((node) => ({
+    node,
+    zone: elementZone(node),
+    score: zoneScores[elementZone(node)] || 0,
+  })).sort((left, right) => right.score - left.score);
+  const bestCandidate = rankedCandidates[0];
+  const secondCandidate = rankedCandidates[1];
+  if (!bestCandidate || bestCandidate.score < 0.16) {
+    clearGazeTarget();
+    $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
+    return;
+  }
+  const { node: closest } = bestCandidate;
+  const candidateMargin = bestCandidate.score - (secondCandidate?.score || 0);
+  if (gazeTargetElement !== closest) {
+    clearGazeTarget();
+    gazeTargetElement = closest;
+    gazeTargetSince = performance.now();
+    closest.classList.add('gaze-candidate');
+    const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
+    $('#gaze-feedback').textContent = `正在留意：${label}`;
+    return;
+  }
+  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 700) {
+    gazeTargetLocked = true;
+    if (closest.classList.contains('contact')) {
+      if (Date.now() >= gazeSuggestionCooldownUntil) showContactGazeSuggestion(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
+    } else if (candidateMargin >= 0.06) {
+      lockGazeTarget(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
+    } else {
+      $('#gaze-feedback').textContent = `系统已找到多个接近候选，当前优先显示：${closest.querySelector('strong')?.textContent || '该对象'}。`;
+    }
+  }
+}
+
+function observeHeadGesture(landmarks) {
+  if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress)) || Date.now() - lastHeadGestureAt < 1500) return;
+  const xValues = landmarks.map((point) => point.x);
+  const yValues = landmarks.map((point) => point.y);
+  headMotionHistory.push({
+    time: performance.now(),
+    x: (Math.min(...xValues) + Math.max(...xValues)) / 2,
+    y: (Math.min(...yValues) + Math.max(...yValues)) / 2,
+  });
+  const cutoff = performance.now() - 1100;
+  headMotionHistory = headMotionHistory.filter((sample) => sample.time >= cutoff);
+  if (headMotionHistory.length < 5) return;
+
+  const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.x)) - Math.min(...headMotionHistory.map((sample) => sample.x));
+  const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.y)) - Math.min(...headMotionHistory.map((sample) => sample.y));
+  if (verticalRange > 0.045 && verticalRange > horizontalRange * 1.45) {
+    lastHeadGestureAt = Date.now();
+    if (pendingGazeSuggestion) {
+      const suggestion = pendingGazeSuggestion;
+      clearGazeSuggestion();
+      void (async () => {
+        await recordHeadDecision('confirm', 'contact_selection');
+        await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+      })();
+    } else {
+      void finishMessageDecision('confirm_send', 'success', 'head');
+    }
+  } else if (horizontalRange > 0.055 && horizontalRange > verticalRange * 1.3) {
+    lastHeadGestureAt = Date.now();
+    if (pendingGazeSuggestion) {
+      void recordHeadDecision('reject', 'contact_selection');
+      rejectGazeSuggestion();
+    } else {
+      void finishMessageDecision('cancel_message', 'cancel', 'head');
+    }
+  }
+}
+
+function updateCalibrationPoint(point) {
+  const target = $('#gaze-calibration-point');
+  target.style.left = `${point.x * 100}vw`;
+  target.style.top = `${point.y * 100}vh`;
+}
+
+function median(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function medianEyeFeatures() {
+  if (eyeFeatureHistory.length < 6) return undefined;
+  return eyeFeatureHistory[0].map((_, index) => median(eyeFeatureHistory.map((sample) => sample[index])));
+}
+
+function finishCalibration(success, message) {
+  clearTimeout(calibrationTimer);
+  calibrationActive = false;
+  $('#gaze-calibration').hidden = true;
+  if (success) {
+    saveGazeCalibration();
+    $('#gaze-feedback').textContent = '9 点校准完成。请注视页面中的卡片，停留约 1.5 秒。';
+    setCameraStatus('视线校准已完成，可识别当前页面注视对象', 'active');
+  } else {
+    gazeMapper = previousGazeMapper;
+    $('#gaze-feedback').textContent = message;
+  }
+}
+
+function runCalibrationStep(index) {
+  if (!calibrationActive) return;
+  if (index >= CALIBRATION_POINTS.length) {
+    try {
+      gazeMapper = fitGazeMapper(calibrationSamples);
+      finishCalibration(true);
+    } catch (error) {
+      finishCalibration(false, error.message);
+    }
+    return;
+  }
+  const point = CALIBRATION_POINTS[index];
+  eyeFeatureHistory = [];
+  updateCalibrationPoint(point);
+  $('#calibration-instruction').textContent = `请持续注视蓝点。正在采集第 ${index + 1} / ${CALIBRATION_POINTS.length} 个位置…`;
+  calibrationTimer = window.setTimeout(() => {
+    const features = medianEyeFeatures();
+    if (!features) {
+      $('#calibration-instruction').textContent = '没有检测到眼部关键点，请正对摄像头后保持注视。将重新采集此位置…';
+      calibrationTimer = window.setTimeout(() => runCalibrationStep(index), 1300);
+      return;
+    }
+    calibrationSamples.push({
+      features,
+      screenX: window.innerWidth * point.x,
+      screenY: window.innerHeight * point.y,
+    });
+    calibrationTimer = window.setTimeout(() => runCalibrationStep(index + 1), 650);
+  }, 2600);
+}
+
+function startGazeCalibration() {
+  if (!cameraStream || !latestEyeFeatures) {
+    toast('请先开启摄像头，并确认已检测到人脸和眼部关键点。');
+    return;
+  }
+  previousGazeMapper = gazeMapper;
+  calibrationSamples = [];
+  calibrationActive = true;
+  clearGazeTarget();
+  $('#gaze-calibration').hidden = false;
+  runCalibrationStep(0);
+}
+
+async function initializeFaceLandmarker() {
+  if (faceLandmarker) return;
+  const { FaceLandmarker, FilesetResolver } = await import(FACE_BUNDLE_URL);
+  const vision = await FilesetResolver.forVisionTasks(FACE_WASM_URL);
+  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: FACE_MODEL_URL },
+    runningMode: 'VIDEO',
+    numFaces: 1,
+    minFaceDetectionConfidence: 0.55,
+    minFacePresenceConfidence: 0.55,
+    minTrackingConfidence: 0.55,
+  });
+}
+
+function updateFacePresence(hasFace) {
+  if (lastFacePresence === hasFace) return;
+  lastFacePresence = hasFace;
+  if (hasFace) {
+    setCameraStatus('已检测到人脸与眼部关键点（本机处理）', 'active');
+  } else {
+    setCameraStatus('未检测到人脸，请正对屏幕并保持光线充足', 'waiting');
+  }
+}
+
+function runFaceDetection() {
+  const video = $('#camera-preview');
+  if (!cameraStream || !faceLandmarker || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+  const now = performance.now();
+  if (now - lastFaceDetectionAt >= 120) {
+    lastFaceDetectionAt = now;
+    try {
+      const result = faceLandmarker.detectForVideo(video, now);
+      const landmarks = result.faceLandmarks?.[0];
+      if (landmarks) {
+        drawFaceLandmarks(landmarks);
+        observeHeadGesture(landmarks);
+        latestEyeFeatures = extractEyeFeatures(landmarks);
+        if (latestEyeFeatures) {
+          eyeFeatureHistory.push([...latestEyeFeatures]);
+          eyeFeatureHistory = eyeFeatureHistory.slice(-24);
+          if (gazeMapper) updateGazeTarget(predictGazePoint(latestEyeFeatures));
+        } else clearGazeTarget();
+      } else {
+        latestEyeFeatures = undefined;
+        eyeFeatureHistory = [];
+        clearFaceOverlay();
+        clearGazeTarget();
+      }
+      updateFacePresence(Boolean(landmarks));
+    } catch (error) {
+      setCameraStatus(`人脸关键点检测暂时不可用：${error.message || '未知错误'}`, 'error');
+      return;
+    }
+  }
+  faceDetectionFrame = requestAnimationFrame(runFaceDetection);
+}
+
+async function startFaceDetection() {
+  try {
+    setCameraStatus('摄像头已开启，正在加载本机人脸关键点模型…', 'waiting');
+    await initializeFaceLandmarker();
+    if (!cameraStream) return;
+    lastFaceDetectionAt = 0;
+    lastFacePresence = undefined;
+    cancelAnimationFrame(faceDetectionFrame);
+    faceDetectionFrame = requestAnimationFrame(runFaceDetection);
+  } catch (error) {
+    setCameraStatus(`摄像头预览正常，但人脸模型加载失败：${error.message || '请检查网络后重试'}`, 'error');
+  }
+}
+
+function cameraErrorMessage(error) {
+  if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
+    return '未获得摄像头权限。请在浏览器地址栏的权限设置中允许摄像头后重试。';
+  }
+  if (error.name === 'NotFoundError') return '未检测到可用摄像头。请检查设备是否已连接。';
+  if (error.name === 'NotReadableError') return '摄像头正被其他应用占用。请关闭会议软件或相机应用后重试。';
+  return `无法开启摄像头：${error.message || '发生未知错误。'}`;
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setCameraStatus('当前浏览器不支持摄像头访问。请使用最新版 Chrome、Edge 或 Firefox。', 'error');
+    return;
+  }
+  try {
+    setCameraStatus('正在请求本机摄像头权限…', 'waiting');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+    });
+    cameraStream = stream;
+    const video = $('#camera-preview');
+    video.srcObject = stream;
+    await video.play();
+    updateCameraControls(true);
+    startFaceDetection();
+    const [track] = stream.getVideoTracks();
+    track?.addEventListener('ended', () => {
+      if (cameraStream === stream) stopCamera(false);
+    }, { once: true });
+  } catch (error) {
+    cameraStream = undefined;
+    updateCameraControls(false);
+    setCameraStatus(cameraErrorMessage(error), 'error');
+  }
+}
+
+function stopCamera(showMessage = true) {
+  if (calibrationActive) finishCalibration(false, '摄像头已关闭，已取消本次视线校准。');
+  cancelAnimationFrame(faceDetectionFrame);
+  faceDetectionFrame = undefined;
+  lastFacePresence = undefined;
+  latestEyeFeatures = undefined;
+  eyeFeatureHistory = [];
+  clearGazeTarget();
+  clearFaceOverlay();
+  if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
+  cameraStream = undefined;
+  const video = $('#camera-preview');
+  video.srcObject = null;
+  updateCameraControls(false);
+  setCameraStatus('摄像头已关闭。', 'idle');
+  if (showMessage) toast('摄像头已关闭，本机画面已停止。');
+}
+
 function renderContacts() {
   $('#contacts').innerHTML = data.contacts.map((contact) => `
     <button class="card contact" data-id="${contact.id}">
       <strong>${contact.name}</strong><small>${contact.relationship}${contact.frequent ? ' · 常用联系人' : ''}</small>
     </button>`).join('');
   document.querySelectorAll('.contact').forEach((node) => node.addEventListener('click', async () => {
-    await api('select_contact', { contact_id: node.dataset.id });
-    document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
-    node.classList.add('selected');
-    toast(`已模拟注视：${node.querySelector('strong').textContent}`);
+    clearGazeSuggestion();
+    clearGazeTarget();
+    lastLockedGaze = undefined;
+    selectedContactId = node.dataset.id;
+    selectedContactSource = 'manual';
+    try {
+      await api('select_contact', { contact_id: node.dataset.id });
+      document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
+      node.classList.add('selected');
+      toast(`已模拟注视：${node.querySelector('strong').textContent}`);
+    } catch (error) {
+      selectedContactId = undefined;
+      selectedContactSource = undefined;
+      toast(error.message);
+    }
   }));
 }
 
@@ -178,6 +966,7 @@ function showSchedule(result) {
       }
     });
   });
+  void recordScreenContext();
 }
 
 function readTextFile(file) {
@@ -222,17 +1011,21 @@ function bindEvents() {
     document.querySelectorAll('.nav-button, .page').forEach((item) => item.classList.remove('active'));
     node.classList.add('active');
     $(`#${node.dataset.page}-page`).classList.add('active');
+    setCameraContext(node.textContent.trim());
+    void recordScreenContext();
   }));
 
-  $('#prepare-message').onclick = async () => {
-    try {
-      const result = await api('prepare_message', { content: $('#message-content').value });
-      pendingMessage = result.pending;
-      $('#message-result').innerHTML = `<div class="result-box">${result.message}<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p></div>`;
-      $('#confirm-send').onclick = async () => resetMessageForm((await api('confirm_send', pendingMessage)).message);
-      $('#cancel-send').onclick = async () => resetMessageForm((await api('cancel_message')).message);
-    } catch (error) { toast(error.message); }
-  };
+  $('#prepare-message').onclick = submitSimulatedSpeech;
+  document.querySelectorAll('.speech-preset').forEach((node) => node.onclick = () => {
+    $('#message-content').value = node.dataset.text;
+    $('#message-content').focus();
+  });
+
+  $('#start-camera').onclick = startCamera;
+  $('#calibrate-gaze').onclick = startGazeCalibration;
+  $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
+  $('#stop-camera').onclick = () => stopCamera();
+  $('#cancel-calibration').onclick = () => finishCalibration(false, '已取消视线校准。');
 
   $('#choose-memo').onclick = () => $('#memo-file').click();
   $('#memo-file').onchange = authorizeSelectedMemos;
@@ -244,6 +1037,11 @@ function bindEvents() {
 
 function resetMessageForm(message) {
   pendingMessage = undefined;
+  messageDecisionInProgress = false;
+  selectedContactId = undefined;
+  selectedContactSource = undefined;
+  clearGazeSuggestion();
+  clearGazeTarget();
   $('#message-content').value = '';
   $('#message-result').innerHTML = '';
   document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
@@ -252,6 +1050,7 @@ function resetMessageForm(message) {
 
 async function init() {
   data = await (await fetch('/api/bootstrap')).json();
+  gazeMapper = loadGazeCalibration();
   $('#profile').innerHTML = data.profiles.map((profile) => `<option value="${profile.id}">${profile.display_name}</option>`).join('');
   if (data.state.authorized_sources?.length) {
     const names = data.state.authorized_sources.map((source) => source.display_name || source).join('、');
@@ -262,11 +1061,15 @@ async function init() {
   renderModes();
   renderGenres();
   bindEvents();
+  updateCameraControls(false);
+  if (gazeMapper) $('#gaze-feedback').textContent = '已加载本机视线校准记录；如更换坐姿、摄像头或屏幕，请重新校准。';
+  void recordScreenContext();
 }
 
 init().catch((error) => toast(`初始化失败：${error.message}`));
 
 window.addEventListener('pagehide', () => {
+  stopCamera(false);
   if (!activeMode) return;
   navigator.sendBeacon('/api/action', JSON.stringify({ action: 'stop_mode_silent' }));
 });

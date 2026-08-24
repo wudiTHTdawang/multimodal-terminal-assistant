@@ -20,7 +20,7 @@
 ```json
 {
   "timestamp_ms": 1000,
-  "type": "speech | gaze | page | nod",
+  "modality": "speech_text | gaze | screen_context | head_gesture",
   "value": "事件内容",
   "confidence": 0.95
 }

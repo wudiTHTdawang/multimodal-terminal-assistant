@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import argparse
 import hashlib
+import re
+import time
+from threading import Lock
 from datetime import datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +20,10 @@ DATA_DIR = ROOT / "data"
 WEB_DIR = ROOT / "web"
 STATE_FILE = DATA_DIR / "runtime_state.json"
 AUTHORIZED_DIR = DATA_DIR / "authorized_memos"
+EVENT_TTL_MS = 10_000
+EVENT_BUFFER_LIMIT = 100
+MULTIMODAL_EVENT_BUFFER = []
+MULTIMODAL_EVENT_LOCK = Lock()
 
 
 def read_json(path: Path):
@@ -33,6 +40,7 @@ def default_state():
         "reminders": [],
         "completed_events": [],
         "preference_adjustments": {},
+        "pending_message": None,
     }
 
 
@@ -64,6 +72,165 @@ def save_state(state):
 def clear_active_music_mode(state):
     state["active_mode"] = None
     state["focus_mode"] = False
+
+
+def current_time_ms():
+    return int(time.time() * 1000)
+
+
+def recent_multimodal_events():
+    """返回仍在有效期内的结构化事件；事件仅存于进程内存。"""
+    now = current_time_ms()
+    with MULTIMODAL_EVENT_LOCK:
+        MULTIMODAL_EVENT_BUFFER[:] = [
+            item for item in MULTIMODAL_EVENT_BUFFER
+            if item["received_at_ms"] >= now - EVENT_TTL_MS
+        ]
+        return [item.copy() for item in MULTIMODAL_EVENT_BUFFER]
+
+
+def record_multimodal_event(event):
+    if not isinstance(event, dict):
+        raise ValueError("event 必须是对象。")
+    modality = str(event.get("modality", "")).strip()
+    if modality not in {"gaze", "screen_context", "speech_text", "head_gesture"}:
+        raise ValueError("modality 仅支持 gaze、screen_context、speech_text 或 head_gesture。")
+    timestamp_ms = event.get("timestamp_ms")
+    if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+        raise ValueError("timestamp_ms 必须是正整数毫秒时间戳。")
+    confidence = event.get("confidence", 1.0)
+    if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        raise ValueError("confidence 必须在 0 到 1 之间。")
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("payload 必须是对象。")
+    if modality == "gaze":
+        required = {"page", "target_type", "target_id", "zone", "dwell_ms"}
+        if not required.issubset(payload):
+            raise ValueError("gaze 事件缺少页面、目标、区域或停留时长字段。")
+        if not isinstance(payload["dwell_ms"], int) or payload["dwell_ms"] < 0:
+            raise ValueError("dwell_ms 必须是非负整数。")
+    if modality == "speech_text" and not str(payload.get("text", "")).strip():
+        raise ValueError("speech_text 事件必须包含非空 text。")
+    if modality == "head_gesture":
+        if payload.get("page") != "message" or payload.get("decision") not in {"confirm", "reject"}:
+            raise ValueError("head_gesture 事件必须包含消息页和 confirm/reject 决策。")
+
+    received_at_ms = current_time_ms()
+    stored = {
+        "modality": modality,
+        "timestamp_ms": timestamp_ms,
+        "confidence": round(float(confidence), 3),
+        "payload": payload,
+        "received_at_ms": received_at_ms,
+    }
+    with MULTIMODAL_EVENT_LOCK:
+        MULTIMODAL_EVENT_BUFFER[:] = [
+            item for item in MULTIMODAL_EVENT_BUFFER
+            if item["received_at_ms"] >= received_at_ms - EVENT_TTL_MS
+        ]
+        MULTIMODAL_EVENT_BUFFER.append(stored)
+        del MULTIMODAL_EVENT_BUFFER[:-EVENT_BUFFER_LIMIT]
+    return {"message": "已在本地短时缓存中记录多模态事件。", "event": stored}
+
+
+def find_contact(contact_id):
+    return next(
+        (item for item in read_json(DATA_DIR / "contacts.json") if item["id"] == contact_id),
+        None,
+    )
+
+
+def parse_simulated_speech(text):
+    normalized = re.sub(r"\s+", "", text)
+    if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
+        return "cancel", ""
+    if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
+        return "confirm", ""
+    match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
+    if match and match.group(1).strip():
+        return "send_message", match.group(1).strip()
+    if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息")):
+        return "send_message", ""
+    return "unknown", ""
+
+
+def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
+    events = recent_multimodal_events()
+    speech_events = [
+        item for item in events
+        if item["modality"] == "speech_text" and abs(item["timestamp_ms"] - speech_timestamp_ms) <= 1_000
+    ]
+    if not speech_events:
+        raise ValueError("未找到对应的模拟语音事件，请重新提交。")
+    speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
+    intent, content = parse_simulated_speech(str(speech["payload"].get("text", "")))
+
+    if intent in {"confirm", "cancel"}:
+        pending = state.get("pending_message")
+        if not pending:
+            return {"message": "当前没有待确认的消息操作。", "intent": intent, "explanation": ["未检测到待确认任务。"]}
+        state["pending_message"] = None
+        state["selected_contact"] = None
+        save_state(state)
+        message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送。"
+        return {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
+
+    if intent != "send_message":
+        return {"message": "暂未理解该模拟语音。可尝试“给他发消息，晚点开会”。", "intent": "unknown", "explanation": ["未匹配到当前支持的消息指令。"]}
+    if not content:
+        return {"message": "请补充需要发送的消息内容。", "intent": intent, "needs_clarification": True, "explanation": ["识别到发送消息意图，但缺少消息正文。"]}
+
+    manual_contact = find_contact(preferred_contact_id) if preferred_contact_id else None
+    gaze_events = [
+        item for item in events
+        if item["modality"] == "gaze"
+        and item["payload"].get("page") == "message"
+        and item["payload"].get("target_type") == "contact"
+        and speech_timestamp_ms - 4_000 <= item["timestamp_ms"] <= speech_timestamp_ms + 1_000
+    ]
+    gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
+    if manual_contact:
+        contact = manual_contact
+        target_explanation = f"本轮优先使用手动选中的联系人：{contact['name']}。"
+    elif gaze:
+        contact = find_contact(gaze["payload"].get("target_id"))
+        if not contact:
+            return {"message": "注视目标不在当前联系人页面，请重新注视联系人。", "intent": intent, "needs_clarification": True, "explanation": ["注视事件中的联系人 ID 无法匹配本地联系人。"]}
+        context_events = [
+            item for item in events
+            if item["modality"] == "screen_context"
+            and item["payload"].get("page") == "message"
+            and abs(item["timestamp_ms"] - speech_timestamp_ms) <= 5_000
+        ]
+        visible_ids = {
+            target.get("target_id")
+            for context in context_events
+            for target in context["payload"].get("visible_targets", [])
+        }
+        if visible_ids and contact["id"] not in visible_ids:
+            return {"message": "联系人页面已变化，请重新注视后再试。", "intent": intent, "needs_clarification": True, "explanation": ["屏幕上下文中不包含该注视联系人。"]}
+        target_explanation = f"在语音前后 4 秒内检测到对{contact['name']}的稳定注视（{gaze['payload']['dwell_ms']}ms，置信度 {gaze['confidence']}）"
+    else:
+        contact = find_contact(state.get("selected_contact"))
+        if not contact:
+            return {"message": "请先注视确认或手动点击需要联系的联系人，再提交模拟语音。", "intent": intent, "needs_clarification": True, "explanation": ["未找到有效视线事件，也没有手动选中的联系人。"]}
+        target_explanation = f"未使用有效视线事件，改用手动选中的联系人：{contact['name']}。"
+
+    pending = {"contact": contact["name"], "contact_id": contact["id"], "content": content}
+    state["selected_contact"] = contact["id"]
+    state["pending_message"] = pending
+    save_state(state)
+    return {
+        "message": f"将通过常用消息应用向{contact['name']}发送：‘{content}’，是否确认？",
+        "intent": intent,
+        "pending": pending,
+        "explanation": [
+            f"识别到模拟语音：{speech['payload']['text']}",
+            target_explanation,
+            "当前屏幕上下文为联系人页面，因此将“他”解析为该联系人。",
+        ],
+    }
 
 
 def choose_track(genre: str, exclude_id: str | None = None):
@@ -217,6 +384,19 @@ class AssistantHandler(SimpleHTTPRequestHandler):
         action = payload["action"]
         state = load_state()
 
+        if action == "record_multimodal_event":
+            return record_multimodal_event(payload.get("event"))
+
+        if action == "get_recent_multimodal_events":
+            events = recent_multimodal_events()
+            return {"message": "已读取本地短时多模态事件。", "events": events}
+
+        if action == "understand_multimodal_command":
+            timestamp_ms = payload.get("speech_timestamp_ms")
+            if not isinstance(timestamp_ms, int):
+                raise ValueError("speech_timestamp_ms 必须是语音事件的毫秒时间戳。")
+            return understand_multimodal_command(state, timestamp_ms, payload.get("preferred_contact_id"))
+
         if action == "select_contact":
             state["selected_contact"] = payload["contact_id"]
             save_state(state)
@@ -231,18 +411,23 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 for item in read_json(DATA_DIR / "contacts.json")
                 if item["id"] == state["selected_contact"]
             )
+            pending = {"contact": contact["name"], "contact_id": contact["id"], "content": content}
+            state["pending_message"] = pending
+            save_state(state)
             return {
                 "message": f"将通过常用消息应用向{contact['name']}发送：‘{content}’，是否确认？",
-                "pending": {"contact": contact["name"], "content": content},
+                "pending": pending,
             }
 
         if action == "confirm_send":
             state["selected_contact"] = None
+            state["pending_message"] = None
             save_state(state)
             return {"message": "模拟发送成功。", "simulated": True}
 
         if action == "cancel_message":
             state["selected_contact"] = None
+            state["pending_message"] = None
             save_state(state)
             return {"message": "已取消本次发送。"}
 
