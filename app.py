@@ -93,8 +93,8 @@ def record_multimodal_event(event):
     if not isinstance(event, dict):
         raise ValueError("event 必须是对象。")
     modality = str(event.get("modality", "")).strip()
-    if modality not in {"gaze", "screen_context", "speech_text"}:
-        raise ValueError("modality 仅支持 gaze、screen_context 或 speech_text。")
+    if modality not in {"gaze", "screen_context", "speech_text", "head_gesture"}:
+        raise ValueError("modality 仅支持 gaze、screen_context、speech_text 或 head_gesture。")
     timestamp_ms = event.get("timestamp_ms")
     if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
         raise ValueError("timestamp_ms 必须是正整数毫秒时间戳。")
@@ -112,6 +112,9 @@ def record_multimodal_event(event):
             raise ValueError("dwell_ms 必须是非负整数。")
     if modality == "speech_text" and not str(payload.get("text", "")).strip():
         raise ValueError("speech_text 事件必须包含非空 text。")
+    if modality == "head_gesture":
+        if payload.get("page") != "message" or payload.get("decision") not in {"confirm", "reject"}:
+            raise ValueError("head_gesture 事件必须包含消息页和 confirm/reject 决策。")
 
     received_at_ms = current_time_ms()
     stored = {
@@ -140,9 +143,9 @@ def find_contact(contact_id):
 
 def parse_simulated_speech(text):
     normalized = re.sub(r"\s+", "", text)
-    if any(word in normalized for word in ("取消", "不要发送", "不发送")):
+    if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
         return "cancel", ""
-    if normalized in {"确认", "确认发送", "是的", "发送", "好的"}:
+    if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
         return "confirm", ""
     match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():

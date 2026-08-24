@@ -74,6 +74,7 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .result { min-height: 18px; max-width: 760px; margin-top: 21px; color: #263754; line-height: 1.7; }
 .result-box { padding: 17px; margin-top: 10px; border: 1px solid #d7e1f5; border-radius: 12px; background: #fff; }
 .result-box ul { margin-bottom: 0; }
+.decision-hint { display: block; margin-top: -3px; color: #6f7d94; font-size: 12px; }
 .authorization-status { min-height: 20px; color: #52627d; font-size: 14px; }
 .schedule-box { display: grid; gap: 10px; }
 .schedule-summary { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; padding-bottom: 10px; border-bottom: 1px solid #e2e8f4; }

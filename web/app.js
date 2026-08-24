@@ -25,6 +25,7 @@ let selectedContactSource;
 let pendingGazeSuggestion;
 let headMotionHistory = [];
 let lastHeadGestureAt = 0;
+let messageDecisionInProgress = false;
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -296,7 +297,7 @@ function targetMetadata(node) {
 }
 
 function validateBrowserEvent(event) {
-  if (!['gaze', 'screen_context', 'speech_text'].includes(event?.modality)) {
+  if (!['gaze', 'screen_context', 'speech_text', 'head_gesture'].includes(event?.modality)) {
     throw new Error('浏览器事件模态不合法。');
   }
   if (!Number.isInteger(event.timestamp_ms) || event.timestamp_ms <= 0) {
@@ -307,6 +308,9 @@ function validateBrowserEvent(event) {
   }
   if (!event.payload || typeof event.payload !== 'object') {
     throw new Error('浏览器事件缺少 payload。');
+  }
+  if (event.modality === 'head_gesture' && (event.payload.page !== 'message' || !['confirm', 'reject'].includes(event.payload.decision))) {
+    throw new Error('头部确认事件缺少消息页或确认结果。');
   }
 }
 
@@ -334,22 +338,40 @@ function recordScreenContext() {
   });
 }
 
-async function finishGazeSelectedMessage(action, outcome) {
-  const result = await api(action, pendingMessage);
-  adjustGazeReliability(outcome);
-  resetMessageForm(result.message);
+async function recordHeadDecision(decision, purpose) {
+  await recordBrowserEvent({
+    modality: 'head_gesture',
+    timestamp_ms: Date.now(),
+    confidence: 0.72,
+    payload: { page: 'message', decision, gesture: decision === 'confirm' ? 'nod' : 'shake', purpose },
+  });
+}
+
+async function finishMessageDecision(action, outcome, source = 'button') {
+  if (!pendingMessage || messageDecisionInProgress) return;
+  messageDecisionInProgress = true;
+  try {
+    if (source === 'head') await recordHeadDecision(outcome === 'success' ? 'confirm' : 'reject', 'message_confirmation');
+    const result = await api(action, pendingMessage);
+    adjustGazeReliability(outcome);
+    resetMessageForm(result.message);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    messageDecisionInProgress = false;
+  }
 }
 
 function renderMessageUnderstanding(result) {
   const explanation = result.explanation?.length
     ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
   const actions = result.pending
-    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p>' : '';
+    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
   $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
   if (result.pending) {
     pendingMessage = result.pending;
-    $('#confirm-send').onclick = () => finishGazeSelectedMessage('confirm_send', 'success').catch((error) => toast(error.message));
-    $('#cancel-send').onclick = () => finishGazeSelectedMessage('cancel_message', 'cancel').catch((error) => toast(error.message));
+    $('#confirm-send').onclick = () => finishMessageDecision('confirm_send', 'success');
+    $('#cancel-send').onclick = () => finishMessageDecision('cancel_message', 'cancel');
   }
 }
 
@@ -381,13 +403,15 @@ async function submitSimulatedSpeech() {
   }
 
   const timestamp = Date.now();
-  await recordBrowserEvent({
-    modality: 'speech_text',
-    timestamp_ms: timestamp,
-    confidence: 1,
-    payload: { text, page: 'message', source: 'simulated' },
-  });
+  const isMessageDecision = Boolean(pendingMessage);
+  if (isMessageDecision) messageDecisionInProgress = true;
   try {
+    await recordBrowserEvent({
+      modality: 'speech_text',
+      timestamp_ms: timestamp,
+      confidence: 1,
+      payload: { text, page: 'message', source: 'simulated' },
+    });
     const result = await api('understand_multimodal_command', {
       speech_timestamp_ms: timestamp,
       preferred_contact_id: selectedContactSource === 'manual' ? selectedContactId : undefined,
@@ -399,7 +423,11 @@ async function submitSimulatedSpeech() {
       return;
     }
     renderMessageUnderstanding(result);
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    if (isMessageDecision) messageDecisionInProgress = false;
+  }
 }
 
 function distanceToRect(point, rect) {
@@ -535,7 +563,7 @@ function updateGazeTarget(prediction) {
 }
 
 function observeHeadGesture(landmarks) {
-  if (!pendingGazeSuggestion || Date.now() - lastHeadGestureAt < 1500) return;
+  if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress)) || Date.now() - lastHeadGestureAt < 1500) return;
   const xValues = landmarks.map((point) => point.x);
   const yValues = landmarks.map((point) => point.y);
   headMotionHistory.push({
@@ -550,13 +578,25 @@ function observeHeadGesture(landmarks) {
   const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.x)) - Math.min(...headMotionHistory.map((sample) => sample.x));
   const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.y)) - Math.min(...headMotionHistory.map((sample) => sample.y));
   if (verticalRange > 0.045 && verticalRange > horizontalRange * 1.45) {
-    const suggestion = pendingGazeSuggestion;
     lastHeadGestureAt = Date.now();
-    clearGazeSuggestion();
-    if (suggestion) void lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+    if (pendingGazeSuggestion) {
+      const suggestion = pendingGazeSuggestion;
+      clearGazeSuggestion();
+      void (async () => {
+        await recordHeadDecision('confirm', 'contact_selection');
+        await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+      })();
+    } else {
+      void finishMessageDecision('confirm_send', 'success', 'head');
+    }
   } else if (horizontalRange > 0.055 && horizontalRange > verticalRange * 1.3) {
     lastHeadGestureAt = Date.now();
-    rejectGazeSuggestion();
+    if (pendingGazeSuggestion) {
+      void recordHeadDecision('reject', 'contact_selection');
+      rejectGazeSuggestion();
+    } else {
+      void finishMessageDecision('cancel_message', 'cancel', 'head');
+    }
   }
 }
 
@@ -997,6 +1037,7 @@ function bindEvents() {
 
 function resetMessageForm(message) {
   pendingMessage = undefined;
+  messageDecisionInProgress = false;
   selectedContactId = undefined;
   selectedContactSource = undefined;
   clearGazeSuggestion();
