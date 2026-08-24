@@ -242,8 +242,24 @@ function targetMetadata(node) {
   };
 }
 
+function validateBrowserEvent(event) {
+  if (!['gaze', 'screen_context', 'speech_text'].includes(event?.modality)) {
+    throw new Error('浏览器事件模态不合法。');
+  }
+  if (!Number.isInteger(event.timestamp_ms) || event.timestamp_ms <= 0) {
+    throw new Error('浏览器事件缺少毫秒时间戳。');
+  }
+  if (typeof event.confidence !== 'number' || event.confidence < 0 || event.confidence > 1) {
+    throw new Error('浏览器事件置信度不在 0 到 1 之间。');
+  }
+  if (!event.payload || typeof event.payload !== 'object') {
+    throw new Error('浏览器事件缺少 payload。');
+  }
+}
+
 async function recordBrowserEvent(event) {
   try {
+    validateBrowserEvent(event);
     await api('record_multimodal_event', { event });
   } catch (error) {
     // 结构化事件失败不阻断本地交互，但会让开发者在控制台看到明确原因。
