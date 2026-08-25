@@ -83,6 +83,12 @@
         <input id="memo-file" type="file" accept=".txt,.md,.json" multiple hidden />
         <button class="secondary" id="choose-memo">选择并授权多个备忘录文件</button>
         <p class="authorization-status" id="authorization-status">尚未选择授权备忘录文件。</p>
+        <label>模拟语音查询<textarea id="schedule-content" placeholder="例如：我明天有什么安排？"></textarea></label>
+        <div class="speech-presets">
+          <button class="secondary schedule-speech-preset" data-text="我今天有什么安排？">预设：今天安排</button>
+          <button class="secondary schedule-speech-preset" data-text="我明天有什么安排？">预设：明天安排</button>
+        </div>
+        <button class="primary" id="prepare-schedule">提交模拟语音查询</button>
         <button class="primary" id="query-schedule">查看所有已授权日程</button>
         <div class="result" id="memo-result"></div>
       </section>

@@ -8,7 +8,7 @@ import hashlib
 import re
 import time
 from threading import Lock
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -153,6 +153,13 @@ def parse_simulated_speech(text):
         return "cancel", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
         return "confirm", ""
+    if "安排" in normalized or "日程" in normalized:
+        if "明天" in normalized:
+            return "query_schedule_tomorrow", ""
+        if "今天" in normalized:
+            return "query_schedule_today", ""
+        if any(word in normalized for word in ("全部", "所有", "最近")):
+            return "query_schedule_all", ""
     match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
         return "send_message", match.group(1).strip()
@@ -192,6 +199,12 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
         save_state(state)
         message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送。"
         return {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
+
+    if intent in {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all"}:
+        result = understand_schedule_query(state, intent, speech)
+        result["intent"] = intent
+        result["explanation"] = [f"识别到模拟语音：{speech['payload']['text']}", "仅读取用户已授权的本地备忘录，不修改日程完成状态。"]
+        return result
 
     if intent != "send_message":
         return {"message": "暂未理解该模拟语音。可尝试“给他发消息，晚点开会”。", "intent": "unknown", "explanation": ["未匹配到当前支持的消息指令。"]}
@@ -379,6 +392,32 @@ def schedule_items(state):
         item["is_past"] = is_past_event(item)
         items.append(item)
     return sorted(items, key=lambda item: (item.get("date", "9999-99-99"), item.get("time", "99:99")))
+
+
+def schedule_query_result(state, target_date=None, title="全部日程"):
+    if not state["authorized_sources"]:
+        raise ValueError("请先授权备忘录文件。")
+    items = schedule_items(state)
+    if target_date:
+        items = [item for item in items if item.get("date") == target_date]
+    return {
+        "message": f"已整理{title}。",
+        "title": title,
+        "items": items,
+        "total": len(items),
+        "completed": sum(item["is_completed"] for item in items),
+        "past": sum(item["is_past"] for item in items),
+    }
+
+
+def understand_schedule_query(state, intent, speech):
+    reference = datetime.fromisoformat("2026-08-23")
+    if intent == "query_schedule_today":
+        return schedule_query_result(state, reference.strftime("%Y-%m-%d"), "今天（2026-08-23）日程")
+    if intent == "query_schedule_tomorrow":
+        date = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime("%Y-%m-%d")
+        return schedule_query_result(state, date, "明天（2026-08-24）日程")
+    return schedule_query_result(state, title="全部已授权日程")
 
 
 class AssistantHandler(SimpleHTTPRequestHandler):
@@ -611,16 +650,7 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             }
 
         if action == "query_schedule":
-            if not state["authorized_sources"]:
-                raise ValueError("请先授权备忘录文件。")
-            items = schedule_items(state)
-            return {
-                "message": "已整理所有已授权备忘录中的日程。",
-                "items": items,
-                "total": len(items),
-                "completed": sum(item["is_completed"] for item in items),
-                "past": sum(item["is_past"] for item in items),
-            }
+            return schedule_query_result(state)
 
         if action == "toggle_event_completion":
             event_key = str(payload["event_key"])

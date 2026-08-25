@@ -1050,7 +1050,7 @@ function showSchedule(result) {
         <small>${item.content || '无补充说明'}</small>
       </label>
     </article>`).join('');
-  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>全部日程</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${items}</div>`;
+  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${items}</div>`;
   document.querySelectorAll('[data-event-key]').forEach((checkbox) => {
     checkbox.addEventListener('change', async () => {
       try {
@@ -1081,6 +1081,29 @@ function readTextFile(file) {
     reader.onerror = () => reject(new Error(`无法读取文件：${file.name}`));
     reader.readAsArrayBuffer(file);
   });
+}
+
+async function submitScheduleSimulatedSpeech() {
+  const text = $('#schedule-content').value.trim();
+  if (!text) {
+    toast('请输入或选择一条日程查询语句。');
+    return;
+  }
+  const timestamp = Date.now();
+  await recordBrowserEvent({
+    modality: 'speech_text',
+    timestamp_ms: timestamp,
+    confidence: 1,
+    payload: { text, page: 'memo', source: 'simulated' },
+  });
+  try {
+    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    if (!result.items) {
+      $('#memo-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong></div>`;
+      return;
+    }
+    showSchedule(result);
+  } catch (error) { toast(error.message); }
 }
 
 async function authorizeSelectedMemos() {
@@ -1124,6 +1147,11 @@ function bindEvents() {
 
   $('#choose-memo').onclick = () => $('#memo-file').click();
   $('#memo-file').onchange = authorizeSelectedMemos;
+  $('#prepare-schedule').onclick = submitScheduleSimulatedSpeech;
+  document.querySelectorAll('.schedule-speech-preset').forEach((node) => node.onclick = () => {
+    $('#schedule-content').value = node.dataset.text;
+    $('#schedule-content').focus();
+  });
   $('#query-schedule').onclick = async () => {
     try { showSchedule(await api('query_schedule')); }
     catch (error) { toast(error.message); }
