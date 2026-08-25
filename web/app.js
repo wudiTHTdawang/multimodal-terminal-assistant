@@ -43,9 +43,14 @@ let authorizedSources = [];
 const DEMO_TRACK_DURATION_SECONDS = 18;
 
 const FACE_TASK_VERSION = '1.0.1';
-const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-const FACE_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`;
-const FACE_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/vision_bundle.mjs`;
+// 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
+const FACE_MODEL_URL = '/models/face_landmarker.task';
+const FACE_BUNDLE_URL = '/vendor/mediapipe/vision_bundle.mjs';
+// WASM 体积较大，保留两个等价来源；一个无法访问时会自动尝试另一个。
+const FACE_WASM_URLS = [
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
+  `https://unpkg.com/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
+];
 const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v3';
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 const CALIBRATION_POINTS = [
@@ -755,15 +760,27 @@ function startGazeCalibration() {
 async function initializeFaceLandmarker() {
   if (faceLandmarker) return;
   const { FaceLandmarker, FilesetResolver } = await import(FACE_BUNDLE_URL);
-  const vision = await FilesetResolver.forVisionTasks(FACE_WASM_URL);
-  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: FACE_MODEL_URL },
-    runningMode: 'VIDEO',
-    numFaces: 1,
-    minFaceDetectionConfidence: 0.55,
-    minFacePresenceConfidence: 0.55,
-    minTrackingConfidence: 0.55,
-  });
+  const modelResponse = await fetch(FACE_MODEL_URL, { cache: 'no-store' });
+  if (!modelResponse.ok) throw new Error(`本地人脸模型文件不可用（HTTP ${modelResponse.status}）。`);
+  const modelAssetBuffer = await modelResponse.arrayBuffer();
+  let lastError;
+  for (const wasmUrl of FACE_WASM_URLS) {
+    try {
+      const vision = await FilesetResolver.forVisionTasks(wasmUrl);
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetBuffer: modelAssetBuffer.slice(0) },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        minFaceDetectionConfidence: 0.55,
+        minFacePresenceConfidence: 0.55,
+        minTrackingConfidence: 0.55,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`视觉运行时无法加载，请检查网络是否可访问 jsDelivr 或 unpkg。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
 }
 
 function updateFacePresence(hasFace) {
