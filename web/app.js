@@ -762,13 +762,14 @@ async function initializeFaceLandmarker() {
   const { FaceLandmarker, FilesetResolver } = await import(FACE_BUNDLE_URL);
   const modelResponse = await fetch(FACE_MODEL_URL, { cache: 'no-store' });
   if (!modelResponse.ok) throw new Error(`本地人脸模型文件不可用（HTTP ${modelResponse.status}）。`);
-  const modelAssetBuffer = await modelResponse.arrayBuffer();
   let lastError;
   for (const wasmUrl of FACE_WASM_URLS) {
     try {
       const vision = await FilesetResolver.forVisionTasks(wasmUrl);
       faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: { modelAssetBuffer: modelAssetBuffer.slice(0) },
+        // 当前 MediaPipe 版本要求由运行时自行读取模型路径；直接传 ArrayBuffer
+        // 会使内部资源读取器收到错误的对象，进而报 “read is not a function”。
+        baseOptions: { modelAssetPath: FACE_MODEL_URL },
         runningMode: 'VIDEO',
         numFaces: 1,
         minFaceDetectionConfidence: 0.55,
