@@ -29,6 +29,12 @@ let messageDecisionInProgress = false;
 let musicGazeTrackId;
 let currentRecommendationReason = '';
 let currentPreferencePlaylist = [];
+let playbackTimer;
+let playbackDeadline = 0;
+let playbackTrackId;
+let playbackFeedbackRecorded = false;
+
+const DEMO_TRACK_DURATION_SECONDS = 18;
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -574,20 +580,30 @@ function updateGazeTarget(prediction) {
 function observeHeadGesture(landmarks) {
   const canAnswerMusic = Boolean(musicGazeTrackId && currentTrack?.id === musicGazeTrackId && activeMode);
   if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
-  const xValues = landmarks.map((point) => point.x);
-  const yValues = landmarks.map((point) => point.y);
+  const leftEye = landmarks[33];
+  const rightEye = landmarks[263];
+  const nose = landmarks[1];
+  if (!leftEye || !rightEye || !nose) return;
+  const eyeCenterX = (leftEye.x + rightEye.x) / 2;
+  const eyeCenterY = (leftEye.y + rightEye.y) / 2;
+  const eyeDistance = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
+  if (eyeDistance < 0.01) return;
   headMotionHistory.push({
     time: performance.now(),
-    x: (Math.min(...xValues) + Math.max(...xValues)) / 2,
-    y: (Math.min(...yValues) + Math.max(...yValues)) / 2,
+    yaw: (nose.x - eyeCenterX) / eyeDistance,
+    pitch: (nose.y - eyeCenterY) / eyeDistance,
   });
-  const cutoff = performance.now() - 1100;
+  const cutoff = performance.now() - 850;
   headMotionHistory = headMotionHistory.filter((sample) => sample.time >= cutoff);
-  if (headMotionHistory.length < 5) return;
+  if (headMotionHistory.length < 4) return;
 
-  const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.x)) - Math.min(...headMotionHistory.map((sample) => sample.x));
-  const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.y)) - Math.min(...headMotionHistory.map((sample) => sample.y));
-  if (verticalRange > 0.045 && verticalRange > horizontalRange * 1.45) {
+  const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.yaw)) - Math.min(...headMotionHistory.map((sample) => sample.yaw));
+  const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.pitch)) - Math.min(...headMotionHistory.map((sample) => sample.pitch));
+  const gentleMusicGesture = canAnswerMusic && !pendingGazeSuggestion && !pendingMessage;
+  const verticalThreshold = gentleMusicGesture ? 0.018 : 0.028;
+  const horizontalThreshold = gentleMusicGesture ? 0.026 : 0.04;
+  const dominance = gentleMusicGesture ? 1.12 : 1.3;
+  if (verticalRange > verticalThreshold && verticalRange > horizontalRange * dominance) {
     lastHeadGestureAt = Date.now();
     if (pendingGazeSuggestion) {
       const suggestion = pendingGazeSuggestion;
@@ -601,7 +617,7 @@ function observeHeadGesture(landmarks) {
     } else {
       void likeCurrentTrack('head');
     }
-  } else if (horizontalRange > 0.055 && horizontalRange > verticalRange * 1.3) {
+  } else if (horizontalRange > horizontalThreshold && horizontalRange > verticalRange * dominance) {
     lastHeadGestureAt = Date.now();
     if (pendingGazeSuggestion) {
       void recordHeadDecision('reject', 'contact_selection');
@@ -883,6 +899,7 @@ async function requestMode(nextMode) {
 
 async function activateMode(mode) {
   try {
+    stopDemoPlayback();
     const result = await api('start_mode', { mode, mode_label: MODE_LABELS[mode] });
     activeMode = mode;
     currentTrack = result.track;
@@ -899,6 +916,7 @@ async function activateMode(mode) {
 
 async function stopMode() {
   try {
+    stopDemoPlayback();
     const result = await api('stop_mode');
     activeMode = undefined;
     musicGazeTrackId = undefined;
@@ -914,11 +932,49 @@ function renderNowPlaying(message) {
   const playlist = currentPreferencePlaylist.length
     ? currentPreferencePlaylist.map((track) => track.title).join('、')
     : '尚未形成偏好歌单；会同时参考该模式下的平台大众常听。';
-  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="music-hint">注视歌曲卡片后：点头表示喜欢，摇头表示不喜欢并换下一首。</p><button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="complete-track">我听完了</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>当前模式偏好歌单：</strong>${playlist}</p></div>`;
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">注视歌曲卡片后：点头表示喜欢，摇头表示不喜欢并换下一首。</p><button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>当前模式偏好歌单：</strong>${playlist}</p></div>`;
   $('#like-track').onclick = likeCurrentTrack;
-  $('#complete-track').onclick = completeCurrentTrack;
   $('#skip-track').onclick = nextTrack;
+  startDemoPlayback();
   void recordScreenContext();
+}
+
+function stopDemoPlayback() {
+  clearInterval(playbackTimer);
+  playbackTimer = undefined;
+  playbackDeadline = 0;
+  playbackTrackId = undefined;
+}
+
+function updatePlaybackProgress() {
+  const node = $('#playback-progress');
+  if (!node || !playbackDeadline) return;
+  const seconds = Math.max(0, Math.ceil((playbackDeadline - Date.now()) / 1000));
+  node.textContent = `本地演示播放中：剩余 ${seconds} 秒；播放结束后系统会自动记录完整收听。`;
+}
+
+function startDemoPlayback() {
+  if (!currentTrack || !activeMode) return;
+  if (playbackTrackId !== currentTrack.id) {
+    stopDemoPlayback();
+    playbackTrackId = currentTrack.id;
+    playbackFeedbackRecorded = false;
+    playbackDeadline = Date.now() + DEMO_TRACK_DURATION_SECONDS * 1000;
+  }
+  updatePlaybackProgress();
+  if (playbackTimer) return;
+  playbackTimer = window.setInterval(() => {
+    if (!currentTrack || playbackTrackId !== currentTrack.id) return;
+    updatePlaybackProgress();
+    if (Date.now() < playbackDeadline) return;
+    clearInterval(playbackTimer);
+    playbackTimer = undefined;
+    if (playbackFeedbackRecorded) {
+      void advanceAfterPlayback();
+    } else {
+      void completeCurrentTrack();
+    }
+  }, 500);
 }
 
 async function likeCurrentTrack(source = 'button') {
@@ -926,6 +982,7 @@ async function likeCurrentTrack(source = 'button') {
     if (!currentTrack) return;
     if (source === 'head') await recordHeadDecision('confirm', 'music_feedback', 'music');
     const result = await api('like_track', { track_id: currentTrack.id });
+    playbackFeedbackRecorded = true;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
     clearGazeTarget();
@@ -937,7 +994,10 @@ async function likeCurrentTrack(source = 'button') {
 async function completeCurrentTrack() {
   try {
     if (!currentTrack) return;
+    stopDemoPlayback();
     const result = await api('complete_track', { track_id: currentTrack.id });
+    currentTrack = result.track;
+    currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
     clearGazeTarget();
@@ -946,9 +1006,23 @@ async function completeCurrentTrack() {
   } catch (error) { toast(error.message); }
 }
 
+async function advanceAfterPlayback() {
+  try {
+    if (!currentTrack) return;
+    const result = await api('advance_track', { current_track_id: currentTrack.id });
+    currentTrack = result.track;
+    currentRecommendationReason = result.recommendation_reason;
+    currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
+    musicGazeTrackId = undefined;
+    clearGazeTarget();
+    renderNowPlaying(result.message);
+  } catch (error) { toast(error.message); }
+}
+
 async function nextTrack(source = 'button') {
   try {
     if (!currentTrack) return;
+    stopDemoPlayback();
     if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
     const result = await api('next_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;

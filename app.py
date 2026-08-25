@@ -530,8 +530,20 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             if track_id not in tracks_by_id():
                 raise ValueError("当前歌曲不在本地音乐库中。")
             adjustment = record_track_preference(state, mode, track_id, 1, add_to_playlist=True)
+            track, reason = recommend_track(state, mode, track_id)
             save_state(state)
-            return {"message": "已记录完整收听，并加入当前模式的偏好歌单。", "adjustment": adjustment, "preference_playlist": mode_preference_playlist(state, mode)}
+            return {"message": f"已检测到完整收听，并加入当前模式的偏好歌单。正在播放：{track['title']}。", "adjustment": adjustment, "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
+
+        if action == "advance_track":
+            mode = state["active_mode"]
+            if not mode:
+                raise ValueError("当前没有启用音乐模式。")
+            track_id = payload["current_track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            track, reason = recommend_track(state, mode, track_id)
+            save_state(state)
+            return {"message": f"正在播放：{track['title']}。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action == "next_track":
             mode = state["active_mode"]
