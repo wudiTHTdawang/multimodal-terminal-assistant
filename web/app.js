@@ -269,7 +269,7 @@ function eligibleGazeElements() {
   const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.genre' : '.schedule-item';
   return [...document.querySelectorAll(selector)].filter((node) => {
     const rect = node.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    return rect.width > 0 && rect.height > 0 && !node.closest('.muted');
   });
 }
 
@@ -475,6 +475,10 @@ async function lockGazeTarget(node, zone, confidence) {
       selectedContactSource = undefined;
       toast(error.message);
     }
+  } else if (node.classList.contains('genre')) {
+    document.querySelectorAll('.genre').forEach((item) => item.classList.remove('selected'));
+    node.classList.add('selected');
+    $('#gaze-feedback').textContent = `已确认注视：${label}。现在可以提交“播放这个”。`;
   }
 }
 
@@ -520,8 +524,10 @@ function showContactGazeSuggestion(node, zone, confidence) {
 }
 
 function updateGazeTarget(prediction) {
-  // 已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
-  if (selectedContactId || pendingMessage) {
+  const activePage = document.querySelector('.page.active')?.id;
+  // 在联系人页面已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
+  // 切换到音乐、日程页面后，它们仍可独立使用视线输入。
+  if (activePage === 'message-page' && (selectedContactId || pendingMessage)) {
     clearGazeTarget();
     return;
   }
@@ -915,9 +921,41 @@ function renderGenres() {
   }));
 }
 
-function renderNowPlaying(message) {
+function renderMusicUnderstanding(result) {
+  if (result.track) {
+    currentTrack = result.track;
+    document.querySelectorAll('.genre').forEach((node) => node.classList.toggle('selected', node.dataset.genre === result.genre));
+    renderNowPlaying(result.message, result.explanation);
+    return;
+  }
+  const explanation = result.explanation?.length
+    ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
+  $('#music-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}</div>`;
+}
+
+async function submitMusicSimulatedSpeech() {
+  const text = $('#music-content').value.trim();
+  if (!text) {
+    toast('请输入或选择一条模拟语音指令。');
+    return;
+  }
+  const timestamp = Date.now();
+  await recordBrowserEvent({
+    modality: 'speech_text',
+    timestamp_ms: timestamp,
+    confidence: 1,
+    payload: { text, page: 'music', source: 'simulated' },
+  });
+  try {
+    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    renderMusicUnderstanding(result);
+  } catch (error) { toast(error.message); }
+}
+
+function renderNowPlaying(message, explanation = []) {
   if (!currentTrack) return;
-  $('#music-result').innerHTML = `<div class="result-box"><strong>正在播放：${currentTrack.title}</strong><p>${message}</p><button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button></div>`;
+  const details = explanation.length ? `<ul class="explanation-list">${explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
+  $('#music-result').innerHTML = `<div class="result-box"><strong>正在播放：${currentTrack.title}</strong><p>${message}</p>${details}<button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button></div>`;
   $('#like-track').onclick = likeCurrentTrack;
   $('#skip-track').onclick = nextTrack;
 }
@@ -1019,6 +1057,11 @@ function bindEvents() {
   document.querySelectorAll('.speech-preset').forEach((node) => node.onclick = () => {
     $('#message-content').value = node.dataset.text;
     $('#message-content').focus();
+  });
+  $('#prepare-music').onclick = submitMusicSimulatedSpeech;
+  document.querySelectorAll('.music-speech-preset').forEach((node) => node.onclick = () => {
+    $('#music-content').value = node.dataset.text;
+    $('#music-content').focus();
   });
 
   $('#start-camera').onclick = startCamera;

@@ -147,12 +147,94 @@ def parse_simulated_speech(text):
         return "cancel", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
         return "confirm", ""
+    if normalized in {"播放这个", "播放这首", "播放这种", "播放", "听这个", "来点这个"}:
+        return "play_gazed_genre", ""
     match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
         return "send_message", match.group(1).strip()
     if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息")):
         return "send_message", ""
     return "unknown", ""
+
+
+def visible_target_ids(events, page, timestamp_ms):
+    return {
+        target.get("target_id")
+        for context in events
+        if context["modality"] == "screen_context"
+        and context["payload"].get("page") == page
+        and abs(context["timestamp_ms"] - timestamp_ms) <= 5_000
+        for target in context["payload"].get("visible_targets", [])
+    }
+
+
+def understand_gazed_music_command(state, events, speech, timestamp_ms):
+    mode = state.get("active_mode")
+    if not mode:
+        return {
+            "message": "请先选择专注、开车或娱乐模式，再告诉我想播放哪种音乐。",
+            "intent": "play_gazed_genre",
+            "needs_clarification": True,
+            "explanation": ["当前没有启用音乐模式。"],
+        }
+    if speech["payload"].get("page") != "music":
+        return {
+            "message": "请在音乐页面注视一种音乐类型后，再说“播放这个”。",
+            "intent": "play_gazed_genre",
+            "needs_clarification": True,
+            "explanation": ["语音发生时不在音乐页面。"],
+        }
+
+    gaze_events = [
+        item for item in events
+        if item["modality"] == "gaze"
+        and item["payload"].get("page") == "music"
+        and item["payload"].get("target_type") == "music_genre"
+        and timestamp_ms - 4_000 <= item["timestamp_ms"] <= timestamp_ms + 1_000
+    ]
+    gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
+    if not gaze:
+        return {
+            "message": "我还没有确认你想听的音乐类型，请注视一个音乐卡片后再试。",
+            "intent": "play_gazed_genre",
+            "needs_clarification": True,
+            "explanation": ["语音附近没有有效的音乐类型注视事件。"],
+        }
+
+    genre = gaze["payload"].get("target_id")
+    known_genres = {track["genre"] for track in read_json(DATA_DIR / "music_library.json")}
+    if genre not in known_genres:
+        return {
+            "message": "当前注视的对象不是可播放的音乐类型，请重新选择。",
+            "intent": "play_gazed_genre",
+            "needs_clarification": True,
+            "explanation": ["注视事件中的音乐类型无法匹配本地音乐库。"],
+        }
+    visible_ids = visible_target_ids(events, "music", timestamp_ms)
+    if visible_ids and genre not in visible_ids:
+        return {
+            "message": "音乐页面已经变化，请重新注视想听的类型后再试。",
+            "intent": "play_gazed_genre",
+            "needs_clarification": True,
+            "explanation": ["当前页面上下文中不包含该音乐类型。"],
+        }
+
+    track = choose_track(genre)
+    record_music_preference(state, mode, genre, 1)
+    save_state(state)
+    mode_labels = {"focus": "专注模式", "driving": "开车模式", "entertainment": "娱乐模式"}
+    return {
+        "message": f"正在播放：{track['title']}。已记录本次{mode_labels[mode]}播放偏好。",
+        "intent": "play_gazed_genre",
+        "track": track,
+        "genre": genre,
+        "mode": mode,
+        "explanation": [
+            f"识别到模拟语音：{speech['payload']['text']}",
+            f"检测到对该音乐类型的稳定注视（{gaze['payload']['dwell_ms']}ms）。",
+            "音乐页面仍显示该类型，因此将“这个”关联为当前注视的音乐类型。",
+        ],
+    }
 
 
 def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
@@ -175,6 +257,9 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
         save_state(state)
         message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送。"
         return {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
+
+    if intent == "play_gazed_genre":
+        return understand_gazed_music_command(state, events, speech, speech_timestamp_ms)
 
     if intent != "send_message":
         return {"message": "暂未理解该模拟语音。可尝试“给他发消息，晚点开会”。", "intent": "unknown", "explanation": ["未匹配到当前支持的消息指令。"]}

@@ -74,6 +74,11 @@
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
         <div class="card-grid muted" id="genres"></div>
+        <label>模拟语音指令<textarea id="music-content" placeholder="例如：播放这个"></textarea></label>
+        <div class="speech-presets">
+          <button class="secondary music-speech-preset" data-text="播放这个">预设：播放这个</button>
+        </div>
+        <button class="primary" id="prepare-music">提交模拟语音指令</button>
         <div class="result" id="music-result"></div>
       </section>
 
