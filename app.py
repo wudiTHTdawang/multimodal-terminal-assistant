@@ -433,6 +433,14 @@ def understand_schedule_query(state, intent, speech):
 
 
 class AssistantHandler(SimpleHTTPRequestHandler):
+    # Python 在部分 Windows 环境中不会为 .mjs 注册 JavaScript 类型，
+    # 浏览器会因此拒绝动态 import。显式声明本地视觉运行时所需的类型。
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        ".mjs": "application/javascript",
+        ".wasm": "application/wasm",
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
