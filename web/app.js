@@ -27,6 +27,8 @@ let headMotionHistory = [];
 let lastHeadGestureAt = 0;
 let messageDecisionInProgress = false;
 let musicGazeTrackId;
+// 当前歌曲已收到明确的“喜欢”反馈后，直到换歌前不再用头部动作重复判断。
+let musicFeedbackLockedTrackId;
 let currentRecommendationReason = '';
 let currentPreferencePlaylist = [];
 let playbackTimer;
@@ -487,6 +489,8 @@ async function lockGazeTarget(node, zone, confidence) {
     }
   } else if (node.classList.contains('music-track-card')) {
     musicGazeTrackId = node.dataset.trackId;
+    // 只从“确认注视歌曲卡片”这一刻开始采集头部运动，避免把此前的自然晃动误判成偏好。
+    headMotionHistory = [];
     $('#gaze-feedback').textContent = `已确认注视：${label}。点头表示喜欢，摇头将换下一首。`;
   }
 }
@@ -537,6 +541,12 @@ function updateGazeTarget(prediction) {
   // 在联系人页面已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
   // 切换到音乐、日程页面后，它们仍可独立使用视线输入。
   if (activePage === 'message-page' && (selectedContactId || pendingMessage)) {
+    clearGazeTarget();
+    return;
+  }
+  // 喜欢当前歌曲后，保留播放状态，但不再重新锁定同一张歌曲卡片。
+  // 下一首歌出现时会清除此标记，届时才会再次允许“注视 + 点头/摇头”。
+  if (activePage === 'music-page' && currentTrack?.id === musicFeedbackLockedTrackId) {
     clearGazeTarget();
     return;
   }
@@ -593,17 +603,31 @@ function observeHeadGesture(landmarks) {
     yaw: (nose.x - eyeCenterX) / eyeDistance,
     pitch: (nose.y - eyeCenterY) / eyeDistance,
   });
-  const cutoff = performance.now() - 850;
+  const cutoff = performance.now() - 1000;
   headMotionHistory = headMotionHistory.filter((sample) => sample.time >= cutoff);
-  if (headMotionHistory.length < 4) return;
+  if (headMotionHistory.length < 6) return;
 
   const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.yaw)) - Math.min(...headMotionHistory.map((sample) => sample.yaw));
   const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.pitch)) - Math.min(...headMotionHistory.map((sample) => sample.pitch));
+  // 用“前半段到后半段的方向性变化”识别动作，而非只看抖动范围。
+  // 摄像头静止噪声会有小范围波动，但不会持续朝一个方向移动。
+  const half = Math.floor(headMotionHistory.length / 2);
+  const firstHalf = headMotionHistory.slice(0, half);
+  const secondHalf = headMotionHistory.slice(half);
+  const average = (samples, field) => samples.reduce((sum, sample) => sum + sample[field], 0) / samples.length;
+  const directionalYaw = average(secondHalf, 'yaw') - average(firstHalf, 'yaw');
+  const directionalPitch = average(secondHalf, 'pitch') - average(firstHalf, 'pitch');
   const gentleMusicGesture = canAnswerMusic && !pendingGazeSuggestion && !pendingMessage;
-  const verticalThreshold = gentleMusicGesture ? 0.018 : 0.028;
-  const horizontalThreshold = gentleMusicGesture ? 0.026 : 0.04;
-  const dominance = gentleMusicGesture ? 1.12 : 1.3;
-  if (verticalRange > verticalThreshold && verticalRange > horizontalRange * dominance) {
+  const verticalThreshold = gentleMusicGesture ? 0.03 : 0.04;
+  const horizontalThreshold = gentleMusicGesture ? 0.045 : 0.06;
+  const dominance = gentleMusicGesture ? 1.15 : 1.3;
+  const verticalGesture = Math.abs(directionalPitch) > verticalThreshold
+    && verticalRange > verticalThreshold * 1.2
+    && Math.abs(directionalPitch) > Math.abs(directionalYaw) * dominance;
+  const horizontalGesture = Math.abs(directionalYaw) > horizontalThreshold
+    && horizontalRange > horizontalThreshold * 1.2
+    && Math.abs(directionalYaw) > Math.abs(directionalPitch) * dominance;
+  if (verticalGesture) {
     lastHeadGestureAt = Date.now();
     if (pendingGazeSuggestion) {
       const suggestion = pendingGazeSuggestion;
@@ -617,7 +641,7 @@ function observeHeadGesture(landmarks) {
     } else {
       void likeCurrentTrack('head');
     }
-  } else if (horizontalRange > horizontalThreshold && horizontalRange > verticalRange * dominance) {
+  } else if (horizontalGesture) {
     lastHeadGestureAt = Date.now();
     if (pendingGazeSuggestion) {
       void recordHeadDecision('reject', 'contact_selection');
@@ -855,7 +879,7 @@ function renderContacts() {
   }));
 }
 
-const MODE_LABELS = { focus: '专注模式', driving: '开车模式', entertainment: '娱乐模式' };
+const MODE_LABELS = { general: '热门推荐', focus: '专注模式', driving: '开车模式', entertainment: '娱乐模式' };
 
 function renderModes() {
   const modes = [
@@ -872,7 +896,7 @@ function renderModes() {
 function updateModeStatus() {
   document.querySelectorAll('.mode').forEach((node) => node.classList.toggle('selected', node.dataset.mode === activeMode));
   if (!activeMode) {
-    $('#mode-status').textContent = '当前未启用音乐模式。请选择一种模式后开始播放。';
+    $('#mode-status').textContent = '当前未启用音乐模式，将为你推荐近期热门歌曲。';
     return;
   }
   $('#mode-status').innerHTML = `当前正在使用<strong>${MODE_LABELS[activeMode]}</strong>。<button class="secondary" id="stop-mode">停止当前模式</button><button class="secondary" id="switch-mode">切换模式</button>`;
@@ -885,6 +909,11 @@ function updateModeStatus() {
 
 async function requestMode(nextMode) {
   if (activeMode && activeMode !== nextMode) {
+    // 从未指定状态的热门推荐进入某一模式，是一次明确选择，不需要再确认。
+    if (activeMode === 'general') {
+      await activateMode(nextMode);
+      return;
+    }
     if (switchArmed) {
       await activateMode(nextMode);
       return;
@@ -906,6 +935,25 @@ async function activateMode(mode) {
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || [];
     musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
+    switchArmed = false;
+    $('#mode-decision').innerHTML = '';
+    updateModeStatus();
+    renderNowPlaying(result.message);
+    toast(result.message);
+  } catch (error) { toast(error.message); }
+}
+
+async function activateGeneralMusic() {
+  try {
+    stopDemoPlayback();
+    const result = await api('start_general_music');
+    activeMode = 'general';
+    currentTrack = result.track;
+    currentRecommendationReason = result.recommendation_reason;
+    currentPreferencePlaylist = result.preference_playlist || [];
+    musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
     updateModeStatus();
@@ -920,6 +968,7 @@ async function stopMode() {
     const result = await api('stop_mode');
     activeMode = undefined;
     musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
     updateModeStatus();
@@ -931,8 +980,12 @@ function renderNowPlaying(message) {
   if (!currentTrack) return;
   const playlist = currentPreferencePlaylist.length
     ? currentPreferencePlaylist.map((track) => track.title).join('、')
-    : '尚未形成偏好歌单；会同时参考该模式下的平台大众常听。';
-  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">注视歌曲卡片后：点头表示喜欢，摇头表示不喜欢并换下一首。</p><button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>当前模式偏好歌单：</strong>${playlist}</p></div>`;
+    : '尚未形成偏好歌单；会同时参考当前状态下的平台大众常听。';
+  const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
+  const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
+    ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
+    : '请先注视歌曲卡片，随后点头表示喜欢，摇头表示不喜欢并换下一首。';
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#like-track').onclick = likeCurrentTrack;
   $('#skip-track').onclick = nextTrack;
   startDemoPlayback();
@@ -985,6 +1038,7 @@ async function likeCurrentTrack(source = 'button') {
     playbackFeedbackRecorded = true;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = currentTrack.id;
     clearGazeTarget();
     renderNowPlaying(result.message);
     toast(result.message);
@@ -1000,6 +1054,7 @@ async function completeCurrentTrack() {
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
     clearGazeTarget();
     renderNowPlaying(result.message);
     toast(result.message);
@@ -1014,6 +1069,7 @@ async function advanceAfterPlayback() {
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
     clearGazeTarget();
     renderNowPlaying(result.message);
   } catch (error) { toast(error.message); }
@@ -1029,6 +1085,7 @@ async function nextTrack(source = 'button') {
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
     clearGazeTarget();
     renderNowPlaying(result.message);
     toast(result.message);
@@ -1113,8 +1170,8 @@ async function authorizeSelectedMemos() {
   try {
     const selectedFiles = await Promise.all(files.map(readTextFile));
     const result = await api('authorize_memo_files', { files: selectedFiles });
-    const names = result.sources.map((source) => source.display_name).join('、');
-    $('#authorization-status').textContent = `当前已授权 ${result.sources.length} 个文件：${names}（仅本地读取）`;
+    const names = result.sources.map((source) => `${source.display_name}（${source.item_count} 项）`).join('、');
+    $('#authorization-status').textContent = `当前已授权 ${result.sources.length} 个文件：${names}（已按本次选择重新读取，仅本地保存）`;
     input.value = '';
     $('#memo-result').innerHTML = '';
     toast('备忘录授权成功。');
@@ -1132,6 +1189,7 @@ function bindEvents() {
     $(`#${node.dataset.page}-page`).classList.add('active');
     setCameraContext(node.textContent.trim());
     void recordScreenContext();
+    if (node.dataset.page === 'music' && !activeMode) await activateGeneralMusic();
   }));
 
   $('#prepare-message').onclick = submitSimulatedSpeech;

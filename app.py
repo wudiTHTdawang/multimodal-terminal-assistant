@@ -31,6 +31,17 @@ def read_json(path: Path):
         return json.load(file)
 
 
+def read_memo_text(path: Path):
+    """兼容 Windows 记事本常见的 UTF-8 与 GB18030 备忘录编码。"""
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"无法识别 {path.name} 的文本编码，请保存为 UTF-8 或 GB18030 后重试。")
+
+
 def default_state():
     return {
         "focus_mode": False,
@@ -264,6 +275,7 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
 
 
 DEMO_COMMON_TRACKS = {
+    "general": ["track_031", "track_024", "track_010", "track_026", "track_012"],
     "focus": ["track_010", "track_015", "track_018", "track_022", "track_004"],
     "driving": ["track_012", "track_028", "track_030", "track_007", "track_008"],
     "entertainment": ["track_024", "track_026", "track_013", "track_025", "track_027"],
@@ -294,7 +306,7 @@ def record_track_preference(state, mode, track_id, delta, add_to_playlist=False)
 
 def recommend_track(state, mode, exclude_id=None):
     track_index = tracks_by_id()
-    candidates = [track for track in track_index.values() if mode in track.get("moods", []) and track["id"] != exclude_id]
+    candidates = [track for track in track_index.values() if (mode == "general" or mode in track.get("moods", [])) and track["id"] != exclude_id]
     if not candidates:
         candidates = [track for track in track_index.values() if track["id"] != exclude_id] or list(track_index.values())
 
@@ -324,7 +336,7 @@ def parse_memo_file(path: Path):
         return entries
 
     entries = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, raw_line in enumerate(read_memo_text(path).splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -411,12 +423,12 @@ def schedule_query_result(state, target_date=None, title="全部日程"):
 
 
 def understand_schedule_query(state, intent, speech):
-    reference = datetime.fromisoformat("2026-08-23")
+    reference = datetime.now()
     if intent == "query_schedule_today":
-        return schedule_query_result(state, reference.strftime("%Y-%m-%d"), "今天（2026-08-23）日程")
+        return schedule_query_result(state, reference.strftime("%Y-%m-%d"), f"今天（{reference:%Y-%m-%d}）日程")
     if intent == "query_schedule_tomorrow":
-        date = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).strftime("%Y-%m-%d")
-        return schedule_query_result(state, date, "明天（2026-08-24）日程")
+        date = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+        return schedule_query_result(state, date.strftime("%Y-%m-%d"), f"明天（{date:%Y-%m-%d}）日程")
     return schedule_query_result(state, title="全部已授权日程")
 
 
@@ -540,6 +552,18 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 "preference_playlist": mode_preference_playlist(state, mode),
             }
 
+        if action == "start_general_music":
+            state["active_mode"] = "general"
+            state["focus_mode"] = False
+            track, reason = recommend_track(state, "general")
+            save_state(state)
+            return {
+                "message": "未选择特定模式，已为你推荐近期热门歌曲。",
+                "track": track,
+                "recommendation_reason": "近期热门歌曲",
+                "preference_playlist": mode_preference_playlist(state, "general"),
+            }
+
         if action == "stop_mode":
             clear_active_music_mode(state)
             save_state(state)
@@ -551,7 +575,7 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             return {"message": "已结束音乐模式会话。"}
 
         if action == "like_track":
-            mode = state["active_mode"]
+            mode = state["active_mode"] or "general"
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
             track_id = payload["track_id"]
@@ -559,10 +583,11 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 raise ValueError("当前歌曲不在本地音乐库中。")
             adjustment = record_track_preference(state, mode, track_id, 3, add_to_playlist=True)
             save_state(state)
-            return {"message": "已加入当前模式的偏好歌单，当前歌曲继续播放。", "adjustment": adjustment, "preference_playlist": mode_preference_playlist(state, mode)}
+            label = "通用偏好歌单" if mode == "general" else "当前模式的偏好歌单"
+            return {"message": f"已加入{label}，当前歌曲继续播放。", "adjustment": adjustment, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action == "complete_track":
-            mode = state["active_mode"]
+            mode = state["active_mode"] or "general"
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
             track_id = payload["track_id"]
@@ -571,10 +596,11 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             adjustment = record_track_preference(state, mode, track_id, 1, add_to_playlist=True)
             track, reason = recommend_track(state, mode, track_id)
             save_state(state)
-            return {"message": f"已检测到完整收听，并加入当前模式的偏好歌单。正在播放：{track['title']}。", "adjustment": adjustment, "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
+            label = "通用偏好歌单" if mode == "general" else "当前模式的偏好歌单"
+            return {"message": f"已检测到完整收听，并加入{label}。正在播放：{track['title']}。", "adjustment": adjustment, "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action == "advance_track":
-            mode = state["active_mode"]
+            mode = state["active_mode"] or "general"
             if not mode:
                 raise ValueError("当前没有启用音乐模式。")
             track_id = payload["current_track_id"]
@@ -585,7 +611,7 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             return {"message": f"正在播放：{track['title']}。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action == "next_track":
-            mode = state["active_mode"]
+            mode = state["active_mode"] or "general"
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
             track_id = payload["current_track_id"]
@@ -605,7 +631,7 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 raise ValueError("请一次选择 1 至 10 个备忘录文件。")
 
             AUTHORIZED_DIR.mkdir(exist_ok=True)
-            sources, total_items, names = [], 0, set()
+            sources, total_items, names, prepared = [], 0, set(), []
             for uploaded in files:
                 filename = Path(str(uploaded["file_name"])).name
                 suffix = Path(filename).suffix.lower()
@@ -616,16 +642,26 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                     raise ValueError("仅支持 .txt、.md 和 .json 格式的备忘录。")
                 if not content.strip() or len(content.encode("utf-8")) > 1_000_000:
                     raise ValueError("每个备忘录内容不能为空，且大小不能超过 1 MB。")
-                stored_path = AUTHORIZED_DIR / filename
+                content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+                stored_name = f"{content_hash}_{filename}"
+                stored_path = AUTHORIZED_DIR / stored_name
                 stored_path.write_text(content, encoding="utf-8")
                 items = parse_memo_file(stored_path)
                 if not items:
                     raise ValueError(f"{filename} 中没有可读取的事项。")
                 names.add(filename)
                 total_items += len(items)
-                sources.append({"display_name": filename, "stored_name": filename})
+                sources.append({"display_name": filename, "stored_name": stored_name, "item_count": len(items)})
+                prepared.append(stored_path)
 
+            # 只在全部新文件通过校验后替换授权列表和内部副本，避免旧日程混入。
+            authorized_root = AUTHORIZED_DIR.resolve()
+            for old_source in state.get("authorized_sources", []):
+                old_path = (AUTHORIZED_DIR / old_source.get("stored_name", "")).resolve()
+                if old_path.parent == authorized_root and old_path.exists() and old_path not in prepared:
+                    old_path.unlink()
             state["authorized_sources"] = sources
+            state["completed_events"] = []
             save_state(state)
             return {
                 "message": f"已授权 {len(sources)} 个文件，共读取 {total_items} 条事项；内容仅保存在本地。",
