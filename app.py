@@ -627,8 +627,11 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 "file_name": payload.get("file_name"),
                 "file_content": payload.get("file_content"),
             }]
+            authorization_mode = payload.get("authorization_mode", "merge")
             if not isinstance(files, list) or not 1 <= len(files) <= 10:
                 raise ValueError("请一次选择 1 至 10 个备忘录文件。")
+            if authorization_mode not in {"merge", "replace"}:
+                raise ValueError("不支持的备忘录授权方式。")
 
             AUTHORIZED_DIR.mkdir(exist_ok=True)
             sources, total_items, names, prepared = [], 0, set(), []
@@ -654,18 +657,51 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 sources.append({"display_name": filename, "stored_name": stored_name, "item_count": len(items)})
                 prepared.append(stored_path)
 
-            # 只在全部新文件通过校验后替换授权列表和内部副本，避免旧日程混入。
+            # 全部新文件通过校验后才更新授权列表。默认按文件名合并：
+            # 用户重新选择同名文件时，新的内容快照会替换旧快照，其余已授权文件保留。
+            old_sources = state.get("authorized_sources", [])
+            for source in old_sources:
+                if "item_count" not in source:
+                    old_path = AUTHORIZED_DIR / source.get("stored_name", "")
+                    try:
+                        source["item_count"] = len(parse_memo_file(old_path))
+                    except (OSError, ValueError):
+                        source["item_count"] = 0
+            if authorization_mode == "replace":
+                final_sources = sources
+            else:
+                final_sources = [source for source in old_sources if source.get("display_name") not in names] + sources
+
             authorized_root = AUTHORIZED_DIR.resolve()
-            for old_source in state.get("authorized_sources", []):
+            kept_files = {source["stored_name"] for source in final_sources}
+            for old_source in old_sources:
                 old_path = (AUTHORIZED_DIR / old_source.get("stored_name", "")).resolve()
-                if old_path.parent == authorized_root and old_path.exists() and old_path not in prepared:
+                if old_path.parent == authorized_root and old_path.exists() and old_path.name not in kept_files:
                     old_path.unlink()
-            state["authorized_sources"] = sources
-            state["completed_events"] = []
+            state["authorized_sources"] = final_sources
+            valid_event_keys = {item["event_key"] for item in schedule_items(state)}
+            state["completed_events"] = [key for key in state.get("completed_events", []) if key in valid_event_keys]
             save_state(state)
             return {
-                "message": f"已授权 {len(sources)} 个文件，共读取 {total_items} 条事项；内容仅保存在本地。",
-                "sources": sources,
+                "message": f"已记住 {len(final_sources)} 个授权文件；本次读取 {total_items} 条事项。",
+                "sources": final_sources,
+            }
+
+        if action == "revoke_memo_file":
+            stored_name = Path(str(payload.get("stored_name", ""))).name
+            source = next((item for item in state.get("authorized_sources", []) if item.get("stored_name") == stored_name), None)
+            if not source:
+                raise ValueError("未找到该授权文件。")
+            state["authorized_sources"] = [item for item in state["authorized_sources"] if item.get("stored_name") != stored_name]
+            stored_path = (AUTHORIZED_DIR / stored_name).resolve()
+            if stored_path.parent == AUTHORIZED_DIR.resolve() and stored_path.exists():
+                stored_path.unlink()
+            valid_event_keys = {item["event_key"] for item in schedule_items(state)}
+            state["completed_events"] = [key for key in state.get("completed_events", []) if key in valid_event_keys]
+            save_state(state)
+            return {
+                "message": f"已取消对 {source.get('display_name', '该文件')} 的授权。",
+                "sources": state["authorized_sources"],
             }
 
         if action == "query_tomorrow":

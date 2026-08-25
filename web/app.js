@@ -35,6 +35,10 @@ let playbackTimer;
 let playbackDeadline = 0;
 let playbackTrackId;
 let playbackFeedbackRecorded = false;
+let playbackPaused = false;
+let pausedPlaybackRemainingMs = 0;
+let memoAuthorizationMode = 'merge';
+let authorizedSources = [];
 
 const DEMO_TRACK_DURATION_SECONDS = 18;
 
@@ -293,6 +297,24 @@ function gazeZone(point) {
 function elementZone(node) {
   const rect = node.getBoundingClientRect();
   return gazeZone({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+}
+
+function zoneCenter(zone) {
+  const [row, column] = zone.split('-');
+  const coordinate = { left: 1 / 6, center: 0.5, right: 5 / 6, top: 1 / 6, middle: 0.5, bottom: 5 / 6 };
+  return { x: coordinate[column] ?? 0.5, y: coordinate[row] ?? 0.5 };
+}
+
+function gazeTargetScore(node, prediction) {
+  const rect = node.getBoundingClientRect();
+  const target = { x: (rect.left + rect.width / 2) / window.innerWidth, y: (rect.top + rect.height / 2) / window.innerHeight };
+  const predicted = zoneCenter(prediction.zone);
+  const distance = Math.hypot(target.x - predicted.x, target.y - predicted.y);
+  const proximity = Math.max(0, 1 - distance / 0.9);
+  // 中心位置只是小幅先验，不会覆盖摄像头实际预测到的区域。
+  const centerPrior = Math.max(0, 1 - Math.hypot(target.x - 0.5, target.y - 0.5) / 0.71);
+  const zoneScore = prediction.zoneScores[elementZone(node)] || 0;
+  return zoneScore * 0.62 + proximity * 0.28 + centerPrior * 0.10;
 }
 
 function targetMetadata(node) {
@@ -555,11 +577,12 @@ function updateGazeTarget(prediction) {
   const rankedCandidates = eligibleGazeElements().map((node) => ({
     node,
     zone: elementZone(node),
-    score: zoneScores[elementZone(node)] || 0,
+    score: gazeTargetScore(node, prediction),
   })).sort((left, right) => right.score - left.score);
   const bestCandidate = rankedCandidates[0];
   const secondCandidate = rankedCandidates[1];
-  if (!bestCandidate || bestCandidate.score < 0.16) {
+  const minimumScore = activePage === 'music-page' ? 0.14 : 0.16;
+  if (!bestCandidate || bestCandidate.score < minimumScore) {
     clearGazeTarget();
     $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
     return;
@@ -985,7 +1008,8 @@ function renderNowPlaying(message) {
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
     : '请先注视歌曲卡片，随后点头表示喜欢，摇头表示不喜欢并换下一首。';
-  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
+  $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
   $('#skip-track').onclick = nextTrack;
   startDemoPlayback();
@@ -997,13 +1021,40 @@ function stopDemoPlayback() {
   playbackTimer = undefined;
   playbackDeadline = 0;
   playbackTrackId = undefined;
+  playbackPaused = false;
+  pausedPlaybackRemainingMs = 0;
 }
 
 function updatePlaybackProgress() {
   const node = $('#playback-progress');
-  if (!node || !playbackDeadline) return;
-  const seconds = Math.max(0, Math.ceil((playbackDeadline - Date.now()) / 1000));
+  if (!node || (!playbackDeadline && !playbackPaused)) return;
+  const remaining = playbackPaused ? pausedPlaybackRemainingMs : playbackDeadline - Date.now();
+  const seconds = Math.max(0, Math.ceil(remaining / 1000));
+  if (playbackPaused) {
+    node.textContent = `本地演示已暂停：剩余 ${seconds} 秒；继续播放后才会自动记录完整收听。`;
+    return;
+  }
   node.textContent = `本地演示播放中：剩余 ${seconds} 秒；播放结束后系统会自动记录完整收听。`;
+}
+
+function toggleDemoPlayback() {
+  if (!currentTrack || !activeMode) return;
+  if (playbackPaused) {
+    playbackPaused = false;
+    playbackDeadline = Date.now() + pausedPlaybackRemainingMs;
+    pausedPlaybackRemainingMs = 0;
+    $('#toggle-playback').textContent = '暂停播放';
+    startDemoPlayback();
+    toast('已继续播放。');
+    return;
+  }
+  pausedPlaybackRemainingMs = Math.max(0, playbackDeadline - Date.now());
+  clearInterval(playbackTimer);
+  playbackTimer = undefined;
+  playbackPaused = true;
+  $('#toggle-playback').textContent = '继续播放';
+  updatePlaybackProgress();
+  toast('已暂停播放。');
 }
 
 function startDemoPlayback() {
@@ -1015,6 +1066,7 @@ function startDemoPlayback() {
     playbackDeadline = Date.now() + DEMO_TRACK_DURATION_SECONDS * 1000;
   }
   updatePlaybackProgress();
+  if (playbackPaused) return;
   if (playbackTimer) return;
   playbackTimer = window.setInterval(() => {
     if (!currentTrack || playbackTrackId !== currentTrack.id) return;
@@ -1169,9 +1221,8 @@ async function authorizeSelectedMemos() {
   if (!files.length) return;
   try {
     const selectedFiles = await Promise.all(files.map(readTextFile));
-    const result = await api('authorize_memo_files', { files: selectedFiles });
-    const names = result.sources.map((source) => `${source.display_name}（${source.item_count} 项）`).join('、');
-    $('#authorization-status').textContent = `当前已授权 ${result.sources.length} 个文件：${names}（已按本次选择重新读取，仅本地保存）`;
+    const result = await api('authorize_memo_files', { files: selectedFiles, authorization_mode: memoAuthorizationMode });
+    renderAuthorizedSources(result.sources, memoAuthorizationMode === 'merge' ? '已合并并更新本次选择的文件。' : '已替换授权文件列表。');
     input.value = '';
     $('#memo-result').innerHTML = '';
     toast('备忘录授权成功。');
@@ -1179,6 +1230,37 @@ async function authorizeSelectedMemos() {
     input.value = '';
     toast(error.message);
   }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character]));
+}
+
+function renderAuthorizedSources(sources, note = '') {
+  authorizedSources = sources || [];
+  if (!authorizedSources.length) {
+    $('#authorization-status').textContent = '尚未选择授权备忘录文件。';
+    $('#authorized-files').innerHTML = '';
+    return;
+  }
+  const names = authorizedSources.map((source) => `${source.display_name}（${source.item_count ?? '已读取'} 项）`).join('、');
+  $('#authorization-status').textContent = `当前已授权 ${authorizedSources.length} 个文件：${names}（仅保存本地授权副本）${note ? ` ${note}` : ''}`;
+  $('#authorized-files').innerHTML = authorizedSources.map((source) => `<div class="authorized-file"><span><strong>${escapeHtml(source.display_name)}</strong> <small>${source.item_count ?? '—'} 项</small></span><button class="secondary revoke-memo" data-stored-name="${escapeHtml(source.stored_name)}">取消授权</button></div>`).join('');
+  document.querySelectorAll('.revoke-memo').forEach((button) => {
+    button.onclick = async () => {
+      try {
+        const result = await api('revoke_memo_file', { stored_name: button.dataset.storedName });
+        renderAuthorizedSources(result.sources, result.message);
+        $('#memo-result').innerHTML = '';
+        toast(result.message);
+      } catch (error) { toast(error.message); }
+    };
+  });
+}
+
+function openMemoPicker(mode) {
+  memoAuthorizationMode = mode;
+  $('#memo-file').click();
 }
 
 function bindEvents() {
@@ -1203,7 +1285,8 @@ function bindEvents() {
   $('#stop-camera').onclick = () => stopCamera();
   $('#cancel-calibration').onclick = () => finishCalibration(false, '已取消视线校准。');
 
-  $('#choose-memo').onclick = () => $('#memo-file').click();
+  $('#choose-memo').onclick = () => openMemoPicker('merge');
+  $('#sync-memo').onclick = () => openMemoPicker('merge');
   $('#memo-file').onchange = authorizeSelectedMemos;
   $('#prepare-schedule').onclick = submitScheduleSimulatedSpeech;
   document.querySelectorAll('.schedule-speech-preset').forEach((node) => node.onclick = () => {
@@ -1234,8 +1317,7 @@ async function init() {
   gazeMapper = loadGazeCalibration();
   $('#profile').innerHTML = data.profiles.map((profile) => `<option value="${profile.id}">${profile.display_name}</option>`).join('');
   if (data.state.authorized_sources?.length) {
-    const names = data.state.authorized_sources.map((source) => source.display_name || source).join('、');
-    $('#authorization-status').textContent = `当前已授权 ${data.state.authorized_sources.length} 个文件：${names}（仅本地读取）`;
+    renderAuthorizedSources(data.state.authorized_sources, '已从本机保存的授权记录恢复。文件若已改动，请选择更新后的同名文件并同步。');
   }
   renderContacts();
   activeMode = data.state.active_mode;

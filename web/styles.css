@@ -84,6 +84,12 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .playlist-summary { margin: 15px 0 0; padding-top: 12px; border-top: 1px solid #e0e7f2; color: #64728a; font-size: 13px; }
 .decision-hint { display: block; margin-top: -3px; color: #6f7d94; font-size: 12px; }
 .authorization-status { min-height: 20px; color: #52627d; font-size: 14px; }
+.authorization-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.authorization-actions .secondary { margin-right: 0; }
+.authorized-file-list { display: grid; max-width: 720px; gap: 7px; margin: 9px 0 18px; }
+.authorized-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid #e0e7f2; border-radius: 8px; color: #536482; background: #fafcff; font-size: 13px; }
+.authorized-file small { color: #71809a; }
+.authorized-file .revoke-memo { flex: 0 0 auto; margin: 0; padding: 6px 9px; color: #92615e; background: #fbeaea; font-size: 12px; }
 .schedule-box { display: grid; gap: 10px; }
 .schedule-summary { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; padding-bottom: 10px; border-bottom: 1px solid #e2e8f4; }
 .schedule-summary span { color: #61718d; font-size: 14px; }
