@@ -40,8 +40,8 @@ select { margin-left: 8px; padding: 8px; border: 0; border-radius: 8px; color: #
 .gaze-calibration-guide { position: fixed; z-index: 41; top: 24px; left: 50%; width: min(440px, calc(100vw - 36px)); padding: 17px 18px; transform: translateX(-50%); border-radius: 13px; color: #20325f; background: #fff; box-shadow: 0 14px 34px #00000045; text-align: center; }
 .gaze-calibration-guide p { margin: 8px 0 13px; color: #536482; line-height: 1.55; }
 .gaze-calibration-point { position: fixed; z-index: 41; width: 28px; height: 28px; border: 5px solid #fff; border-radius: 50%; background: #4e79ee; box-shadow: 0 0 0 9px #4e79ee66, 0 0 24px #ffffffcc; transform: translate(-50%, -50%); transition: left .45s ease, top .45s ease; }
-.card.gaze-candidate, .schedule-item.gaze-candidate { border-color: #e1ad35; box-shadow: 0 0 0 3px #f4c66044; }
-.card.gaze-focused, .schedule-item.gaze-focused { border-color: #48a976; box-shadow: 0 0 0 3px #62cf9140; }
+.card.gaze-candidate, .schedule-item.gaze-candidate, .music-track-card.gaze-candidate { border-color: #e1ad35; box-shadow: 0 0 0 3px #f4c66044; }
+.card.gaze-focused, .schedule-item.gaze-focused, .music-track-card.gaze-focused { border-color: #48a976; box-shadow: 0 0 0 3px #62cf9140; }
 .contact-gaze-prompt { position: fixed; z-index: 25; width: 250px; padding: 10px 11px; border: 1px solid #dbe3f2; border-radius: 10px; color: #43516b; background: #fffffff2; box-shadow: 0 7px 20px #263d931f; font-size: 12px; line-height: 1.45; }
 .contact-gaze-prompt strong { color: #344e9e; font-size: 13px; }
 .contact-gaze-prompt p { margin: 4px 0 8px; }
@@ -75,6 +75,12 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .result-box { padding: 17px; margin-top: 10px; border: 1px solid #d7e1f5; border-radius: 12px; background: #fff; }
 .result-box ul { margin-bottom: 0; }
 .explanation-list { color: #5d6c85; font-size: 13px; }
+.music-track-card { display: grid; gap: 4px; padding: 15px 16px; margin-bottom: 14px; border: 2px solid #d9e2f2; border-radius: 11px; background: linear-gradient(110deg, #f7f9ff, #ffffff); transition: .16s ease; }
+.music-track-card span { color: #6177bd; font-size: 12px; font-weight: 700; }
+.music-track-card strong { color: #223b82; font-size: 19px; }
+.music-track-card small { color: #687892; }
+.music-hint { padding: 9px 11px; border-radius: 8px; color: #536482; background: #f2f5fb; font-size: 13px; }
+.playlist-summary { margin: 15px 0 0; padding-top: 12px; border-top: 1px solid #e0e7f2; color: #64728a; font-size: 13px; }
 .decision-hint { display: block; margin-top: -3px; color: #6f7d94; font-size: 12px; }
 .authorization-status { min-height: 20px; color: #52627d; font-size: 14px; }
 .schedule-box { display: grid; gap: 10px; }

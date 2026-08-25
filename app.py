@@ -40,6 +40,9 @@ def default_state():
         "reminders": [],
         "completed_events": [],
         "preference_adjustments": {},
+        "track_preferences": {},
+        "mode_preference_playlists": {},
+        "recommendation_turns": {},
         "pending_message": None,
     }
 
@@ -60,6 +63,9 @@ def load_state():
     adjustments = state.get("preference_adjustments", {})
     if any(isinstance(value, int) for value in adjustments.values()):
         state["preference_adjustments"] = {"focus": adjustments}
+    state["track_preferences"] = state.get("track_preferences") if isinstance(state.get("track_preferences"), dict) else {}
+    state["mode_preference_playlists"] = state.get("mode_preference_playlists") if isinstance(state.get("mode_preference_playlists"), dict) else {}
+    state["recommendation_turns"] = state.get("recommendation_turns") if isinstance(state.get("recommendation_turns"), dict) else {}
     return state
 
 
@@ -113,8 +119,8 @@ def record_multimodal_event(event):
     if modality == "speech_text" and not str(payload.get("text", "")).strip():
         raise ValueError("speech_text 事件必须包含非空 text。")
     if modality == "head_gesture":
-        if payload.get("page") != "message" or payload.get("decision") not in {"confirm", "reject"}:
-            raise ValueError("head_gesture 事件必须包含消息页和 confirm/reject 决策。")
+        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject"}:
+            raise ValueError("head_gesture 事件必须包含支持的页面和 confirm/reject 决策。")
 
     received_at_ms = current_time_ms()
     stored = {
@@ -147,8 +153,6 @@ def parse_simulated_speech(text):
         return "cancel", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
         return "confirm", ""
-    if normalized in {"播放这个", "播放这首", "播放这种", "播放", "听这个", "来点这个"}:
-        return "play_gazed_genre", ""
     match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
         return "send_message", match.group(1).strip()
@@ -165,75 +169,6 @@ def visible_target_ids(events, page, timestamp_ms):
         and context["payload"].get("page") == page
         and abs(context["timestamp_ms"] - timestamp_ms) <= 5_000
         for target in context["payload"].get("visible_targets", [])
-    }
-
-
-def understand_gazed_music_command(state, events, speech, timestamp_ms):
-    mode = state.get("active_mode")
-    if not mode:
-        return {
-            "message": "请先选择专注、开车或娱乐模式，再告诉我想播放哪种音乐。",
-            "intent": "play_gazed_genre",
-            "needs_clarification": True,
-            "explanation": ["当前没有启用音乐模式。"],
-        }
-    if speech["payload"].get("page") != "music":
-        return {
-            "message": "请在音乐页面注视一种音乐类型后，再说“播放这个”。",
-            "intent": "play_gazed_genre",
-            "needs_clarification": True,
-            "explanation": ["语音发生时不在音乐页面。"],
-        }
-
-    gaze_events = [
-        item for item in events
-        if item["modality"] == "gaze"
-        and item["payload"].get("page") == "music"
-        and item["payload"].get("target_type") == "music_genre"
-        and timestamp_ms - 4_000 <= item["timestamp_ms"] <= timestamp_ms + 1_000
-    ]
-    gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
-    if not gaze:
-        return {
-            "message": "我还没有确认你想听的音乐类型，请注视一个音乐卡片后再试。",
-            "intent": "play_gazed_genre",
-            "needs_clarification": True,
-            "explanation": ["语音附近没有有效的音乐类型注视事件。"],
-        }
-
-    genre = gaze["payload"].get("target_id")
-    known_genres = {track["genre"] for track in read_json(DATA_DIR / "music_library.json")}
-    if genre not in known_genres:
-        return {
-            "message": "当前注视的对象不是可播放的音乐类型，请重新选择。",
-            "intent": "play_gazed_genre",
-            "needs_clarification": True,
-            "explanation": ["注视事件中的音乐类型无法匹配本地音乐库。"],
-        }
-    visible_ids = visible_target_ids(events, "music", timestamp_ms)
-    if visible_ids and genre not in visible_ids:
-        return {
-            "message": "音乐页面已经变化，请重新注视想听的类型后再试。",
-            "intent": "play_gazed_genre",
-            "needs_clarification": True,
-            "explanation": ["当前页面上下文中不包含该音乐类型。"],
-        }
-
-    track = choose_track(genre)
-    record_music_preference(state, mode, genre, 1)
-    save_state(state)
-    mode_labels = {"focus": "专注模式", "driving": "开车模式", "entertainment": "娱乐模式"}
-    return {
-        "message": f"正在播放：{track['title']}。已记录本次{mode_labels[mode]}播放偏好。",
-        "intent": "play_gazed_genre",
-        "track": track,
-        "genre": genre,
-        "mode": mode,
-        "explanation": [
-            f"识别到模拟语音：{speech['payload']['text']}",
-            f"检测到对该音乐类型的稳定注视（{gaze['payload']['dwell_ms']}ms）。",
-            "音乐页面仍显示该类型，因此将“这个”关联为当前注视的音乐类型。",
-        ],
     }
 
 
@@ -257,9 +192,6 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
         save_state(state)
         message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送。"
         return {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
-
-    if intent == "play_gazed_genre":
-        return understand_gazed_music_command(state, events, speech, speech_timestamp_ms)
 
     if intent != "send_message":
         return {"message": "暂未理解该模拟语音。可尝试“给他发消息，晚点开会”。", "intent": "unknown", "explanation": ["未匹配到当前支持的消息指令。"]}
@@ -318,18 +250,56 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
     }
 
 
-def choose_track(genre: str, exclude_id: str | None = None):
-    tracks = read_json(DATA_DIR / "music_library.json")
-    matching = [track for track in tracks if track["genre"] == genre]
-    if not matching:
-        return tracks[0]
-    return next((track for track in matching if track["id"] != exclude_id), matching[0])
+DEMO_COMMON_TRACKS = {
+    "focus": ["track_010", "track_015", "track_018", "track_022", "track_004"],
+    "driving": ["track_012", "track_028", "track_030", "track_007", "track_008"],
+    "entertainment": ["track_024", "track_026", "track_013", "track_025", "track_027"],
+}
 
 
-def record_music_preference(state, mode: str, genre: str, delta: int):
-    adjustments = state["preference_adjustments"].setdefault(mode, {})
-    adjustments[genre] = adjustments.get(genre, 0) + delta
-    return adjustments[genre]
+def tracks_by_id():
+    return {track["id"]: track for track in read_json(DATA_DIR / "music_library.json")}
+
+
+def mode_preference_playlist(state, mode):
+    track_index = tracks_by_id()
+    ids = state["mode_preference_playlists"].get(mode, [])
+    return [track_index[track_id] for track_id in ids if track_id in track_index]
+
+
+def record_track_preference(state, mode, track_id, delta, add_to_playlist=False):
+    scores = state["track_preferences"].setdefault(mode, {})
+    score = scores.get(track_id, 0) + delta
+    scores[track_id] = score
+    playlist = state["mode_preference_playlists"].setdefault(mode, [])
+    if add_to_playlist and track_id not in playlist:
+        playlist.append(track_id)
+    if score < 0 and track_id in playlist:
+        playlist.remove(track_id)
+    return score
+
+
+def recommend_track(state, mode, exclude_id=None):
+    track_index = tracks_by_id()
+    candidates = [track for track in track_index.values() if mode in track.get("moods", []) and track["id"] != exclude_id]
+    if not candidates:
+        candidates = [track for track in track_index.values() if track["id"] != exclude_id] or list(track_index.values())
+
+    common_ids = [track_id for track_id in DEMO_COMMON_TRACKS[mode] if track_id in track_index and track_id != exclude_id]
+    scores = state["track_preferences"].get(mode, {})
+    preferred_ids = [track["id"] for track in mode_preference_playlist(state, mode) if track["id"] != exclude_id and scores.get(track["id"], 0) >= 0]
+    turn = state["recommendation_turns"].get(mode, 0)
+    state["recommendation_turns"][mode] = turn + 1
+
+    # 每三次至少推荐一次该模式的本地大众常听曲目，避免推荐只困在历史偏好里。
+    if common_ids and (not preferred_ids or turn % 3 == 2):
+        return track_index[common_ids[turn % len(common_ids)]], "该模式下的平台大众常听"
+    if preferred_ids:
+        ranked_ids = sorted(preferred_ids, key=lambda track_id: scores.get(track_id, 0), reverse=True)
+        return track_index[ranked_ids[0]], "你的本模式偏好歌单"
+    if common_ids:
+        return track_index[common_ids[0]], "该模式下的平台大众常听"
+    return candidates[0], "与当前模式匹配"
 
 
 def parse_memo_file(path: Path):
@@ -522,8 +492,14 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 raise ValueError("不支持的音乐模式。")
             state["active_mode"] = mode
             state["focus_mode"] = mode == "focus"
+            track, reason = recommend_track(state, mode)
             save_state(state)
-            return {"message": f"已进入{payload['mode_label']}，请选择想播放的音乐。"}
+            return {
+                "message": f"已进入{payload['mode_label']}，已为你检索一首适合当前状态的歌曲。",
+                "track": track,
+                "recommendation_reason": reason,
+                "preference_playlist": mode_preference_playlist(state, mode),
+            }
 
         if action == "stop_mode":
             clear_active_music_mode(state)
@@ -535,38 +511,39 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             save_state(state)
             return {"message": "已结束音乐模式会话。"}
 
-        if action == "play_genre":
-            mode = state["active_mode"]
-            if not mode:
-                raise ValueError("请先选择专注、开车或娱乐模式。")
-            track = choose_track(payload["genre"])
-            record_music_preference(state, mode, track["genre"], 1)
-            save_state(state)
-            return {
-                "message": f"正在播放：{track['title']}。已记录本次{payload['mode_label']}播放偏好。",
-                "track": track,
-                "mode": mode,
-            }
-
         if action == "like_track":
             mode = state["active_mode"]
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
-            genre = payload["genre"]
-            adjustment = record_music_preference(state, mode, genre, 2)
+            track_id = payload["track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            adjustment = record_track_preference(state, mode, track_id, 3, add_to_playlist=True)
             save_state(state)
-            return {"message": "已记录喜欢反馈，当前歌曲继续播放。", "adjustment": adjustment}
+            return {"message": "已加入当前模式的偏好歌单，当前歌曲继续播放。", "adjustment": adjustment, "preference_playlist": mode_preference_playlist(state, mode)}
+
+        if action == "complete_track":
+            mode = state["active_mode"]
+            if not mode:
+                raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
+            track_id = payload["track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            adjustment = record_track_preference(state, mode, track_id, 1, add_to_playlist=True)
+            save_state(state)
+            return {"message": "已记录完整收听，并加入当前模式的偏好歌单。", "adjustment": adjustment, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action == "next_track":
             mode = state["active_mode"]
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
-            genre = payload["genre"]
-            record_music_preference(state, mode, genre, -1)
-            track = choose_track(genre, payload.get("current_track_id"))
-            record_music_preference(state, mode, track["genre"], 1)
+            track_id = payload["current_track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            record_track_preference(state, mode, track_id, -2)
+            track, reason = recommend_track(state, mode, track_id)
             save_state(state)
-            return {"message": f"已跳过当前歌曲，正在播放：{track['title']}。", "track": track}
+            return {"message": f"已降低这首歌的偏好值，正在播放：{track['title']}。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action in {"authorize_memo_file", "authorize_memo_files"}:
             files = payload.get("files") or [{

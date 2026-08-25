@@ -26,6 +26,9 @@ let pendingGazeSuggestion;
 let headMotionHistory = [];
 let lastHeadGestureAt = 0;
 let messageDecisionInProgress = false;
+let musicGazeTrackId;
+let currentRecommendationReason = '';
+let currentPreferencePlaylist = [];
 
 const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -266,7 +269,7 @@ function adjustGazeReliability(outcome) {
 
 function eligibleGazeElements() {
   const activePage = document.querySelector('.page.active')?.id;
-  const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.genre' : '.schedule-item';
+  const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.music-track-card' : '.schedule-item';
   return [...document.querySelectorAll(selector)].filter((node) => {
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 && !node.closest('.muted');
@@ -287,11 +290,12 @@ function elementZone(node) {
 function targetMetadata(node) {
   const page = document.querySelector('.page.active')?.id.replace('-page', '') || 'unknown';
   const isSchedule = node.classList.contains('schedule-item');
+  const isMusicTrack = node.classList.contains('music-track-card');
   const label = node.querySelector('strong')?.textContent || node.querySelector('.schedule-title')?.textContent || '当前项目';
   return {
     page,
-    target_type: isSchedule ? 'schedule_item' : page === 'music' ? 'music_genre' : 'contact',
-    target_id: node.dataset.id || node.querySelector('[data-event-key]')?.dataset.eventKey || node.dataset.genre || label,
+    target_type: isSchedule ? 'schedule_item' : isMusicTrack ? 'music_track' : 'contact',
+    target_id: node.dataset.id || node.dataset.trackId || node.querySelector('[data-event-key]')?.dataset.eventKey || label,
     label,
   };
 }
@@ -309,8 +313,8 @@ function validateBrowserEvent(event) {
   if (!event.payload || typeof event.payload !== 'object') {
     throw new Error('浏览器事件缺少 payload。');
   }
-  if (event.modality === 'head_gesture' && (event.payload.page !== 'message' || !['confirm', 'reject'].includes(event.payload.decision))) {
-    throw new Error('头部确认事件缺少消息页或确认结果。');
+  if (event.modality === 'head_gesture' && (!['message', 'music'].includes(event.payload.page) || !['confirm', 'reject'].includes(event.payload.decision))) {
+    throw new Error('头部确认事件缺少页面或确认结果。');
   }
 }
 
@@ -338,12 +342,12 @@ function recordScreenContext() {
   });
 }
 
-async function recordHeadDecision(decision, purpose) {
+async function recordHeadDecision(decision, purpose, page = 'message') {
   await recordBrowserEvent({
     modality: 'head_gesture',
     timestamp_ms: Date.now(),
     confidence: 0.72,
-    payload: { page: 'message', decision, gesture: decision === 'confirm' ? 'nod' : 'shake', purpose },
+    payload: { page, decision, gesture: decision === 'confirm' ? 'nod' : 'shake', purpose },
   });
 }
 
@@ -475,10 +479,9 @@ async function lockGazeTarget(node, zone, confidence) {
       selectedContactSource = undefined;
       toast(error.message);
     }
-  } else if (node.classList.contains('genre')) {
-    document.querySelectorAll('.genre').forEach((item) => item.classList.remove('selected'));
-    node.classList.add('selected');
-    $('#gaze-feedback').textContent = `已确认注视：${label}。现在可以提交“播放这个”。`;
+  } else if (node.classList.contains('music-track-card')) {
+    musicGazeTrackId = node.dataset.trackId;
+    $('#gaze-feedback').textContent = `已确认注视：${label}。点头表示喜欢，摇头将换下一首。`;
   }
 }
 
@@ -569,7 +572,8 @@ function updateGazeTarget(prediction) {
 }
 
 function observeHeadGesture(landmarks) {
-  if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress)) || Date.now() - lastHeadGestureAt < 1500) return;
+  const canAnswerMusic = Boolean(musicGazeTrackId && currentTrack?.id === musicGazeTrackId && activeMode);
+  if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
   const xValues = landmarks.map((point) => point.x);
   const yValues = landmarks.map((point) => point.y);
   headMotionHistory.push({
@@ -592,16 +596,20 @@ function observeHeadGesture(landmarks) {
         await recordHeadDecision('confirm', 'contact_selection');
         await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
       })();
-    } else {
+    } else if (pendingMessage) {
       void finishMessageDecision('confirm_send', 'success', 'head');
+    } else {
+      void likeCurrentTrack('head');
     }
   } else if (horizontalRange > 0.055 && horizontalRange > verticalRange * 1.3) {
     lastHeadGestureAt = Date.now();
     if (pendingGazeSuggestion) {
       void recordHeadDecision('reject', 'contact_selection');
       rejectGazeSuggestion();
-    } else {
+    } else if (pendingMessage) {
       void finishMessageDecision('cancel_message', 'cancel', 'head');
+    } else {
+      void nextTrack('head');
     }
   }
 }
@@ -849,11 +857,9 @@ function updateModeStatus() {
   document.querySelectorAll('.mode').forEach((node) => node.classList.toggle('selected', node.dataset.mode === activeMode));
   if (!activeMode) {
     $('#mode-status').textContent = '当前未启用音乐模式。请选择一种模式后开始播放。';
-    $('#genres').classList.add('muted');
     return;
   }
   $('#mode-status').innerHTML = `当前正在使用<strong>${MODE_LABELS[activeMode]}</strong>。<button class="secondary" id="stop-mode">停止当前模式</button><button class="secondary" id="switch-mode">切换模式</button>`;
-  $('#genres').classList.remove('muted');
   $('#stop-mode').onclick = stopMode;
   $('#switch-mode').onclick = () => {
     switchArmed = true;
@@ -879,9 +885,14 @@ async function activateMode(mode) {
   try {
     const result = await api('start_mode', { mode, mode_label: MODE_LABELS[mode] });
     activeMode = mode;
+    currentTrack = result.track;
+    currentRecommendationReason = result.recommendation_reason;
+    currentPreferencePlaylist = result.preference_playlist || [];
+    musicGazeTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
     updateModeStatus();
+    renderNowPlaying(result.message);
     toast(result.message);
   } catch (error) { toast(error.message); }
 }
@@ -890,6 +901,7 @@ async function stopMode() {
   try {
     const result = await api('stop_mode');
     activeMode = undefined;
+    musicGazeTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
     updateModeStatus();
@@ -897,81 +909,53 @@ async function stopMode() {
   } catch (error) { toast(error.message); }
 }
 
-function renderGenres() {
-  const genres = [
-    ['lofi', 'Lo-fi', '轻节奏、低干扰'],
-    ['light_music', '轻音乐', '平稳、舒缓'],
-    ['pure_music', '纯音乐', '安静、无歌词'],
-    ['classical', '古典音乐', '器乐与交响乐'],
-    ['pop', '流行音乐', '轻松、易听'],
-    ['jazz', '爵士乐', '松弛、有律动'],
-    ['rock', '摇滚乐', '高能量、适合通勤'],
-    ['electronic', '电子音乐', '节奏鲜明、适合驾车'],
-  ];
-  $('#genres').innerHTML = genres.map(([id, name, note]) => `
-    <button class="card genre" data-genre="${id}"><strong>${name}</strong><small>${note}</small></button>`).join('');
-  document.querySelectorAll('.genre').forEach((node) => node.addEventListener('click', async () => {
-    try {
-      const result = await api('play_genre', { genre: node.dataset.genre, mode_label: MODE_LABELS[activeMode] });
-      currentTrack = result.track;
-      document.querySelectorAll('.genre').forEach((item) => item.classList.remove('selected'));
-      node.classList.add('selected');
-      renderNowPlaying(result.message);
-    } catch (error) { toast(error.message); }
-  }));
-}
-
-function renderMusicUnderstanding(result) {
-  if (result.track) {
-    currentTrack = result.track;
-    document.querySelectorAll('.genre').forEach((node) => node.classList.toggle('selected', node.dataset.genre === result.genre));
-    renderNowPlaying(result.message, result.explanation);
-    return;
-  }
-  const explanation = result.explanation?.length
-    ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
-  $('#music-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}</div>`;
-}
-
-async function submitMusicSimulatedSpeech() {
-  const text = $('#music-content').value.trim();
-  if (!text) {
-    toast('请输入或选择一条模拟语音指令。');
-    return;
-  }
-  const timestamp = Date.now();
-  await recordBrowserEvent({
-    modality: 'speech_text',
-    timestamp_ms: timestamp,
-    confidence: 1,
-    payload: { text, page: 'music', source: 'simulated' },
-  });
-  try {
-    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
-    renderMusicUnderstanding(result);
-  } catch (error) { toast(error.message); }
-}
-
-function renderNowPlaying(message, explanation = []) {
+function renderNowPlaying(message) {
   if (!currentTrack) return;
-  const details = explanation.length ? `<ul class="explanation-list">${explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
-  $('#music-result').innerHTML = `<div class="result-box"><strong>正在播放：${currentTrack.title}</strong><p>${message}</p>${details}<button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button></div>`;
+  const playlist = currentPreferencePlaylist.length
+    ? currentPreferencePlaylist.map((track) => track.title).join('、')
+    : '尚未形成偏好歌单；会同时参考该模式下的平台大众常听。';
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="music-hint">注视歌曲卡片后：点头表示喜欢，摇头表示不喜欢并换下一首。</p><button class="secondary" id="like-track">我喜欢这首</button><button class="secondary" id="complete-track">我听完了</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>当前模式偏好歌单：</strong>${playlist}</p></div>`;
   $('#like-track').onclick = likeCurrentTrack;
+  $('#complete-track').onclick = completeCurrentTrack;
   $('#skip-track').onclick = nextTrack;
+  void recordScreenContext();
 }
 
-async function likeCurrentTrack() {
+async function likeCurrentTrack(source = 'button') {
   try {
-    const result = await api('like_track', { genre: currentTrack.genre });
+    if (!currentTrack) return;
+    if (source === 'head') await recordHeadDecision('confirm', 'music_feedback', 'music');
+    const result = await api('like_track', { track_id: currentTrack.id });
+    currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
+    musicGazeTrackId = undefined;
+    clearGazeTarget();
     renderNowPlaying(result.message);
     toast(result.message);
   } catch (error) { toast(error.message); }
 }
 
-async function nextTrack() {
+async function completeCurrentTrack() {
   try {
-    const result = await api('next_track', { genre: currentTrack.genre, current_track_id: currentTrack.id });
+    if (!currentTrack) return;
+    const result = await api('complete_track', { track_id: currentTrack.id });
+    currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
+    musicGazeTrackId = undefined;
+    clearGazeTarget();
+    renderNowPlaying(result.message);
+    toast(result.message);
+  } catch (error) { toast(error.message); }
+}
+
+async function nextTrack(source = 'button') {
+  try {
+    if (!currentTrack) return;
+    if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
+    const result = await api('next_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
+    currentRecommendationReason = result.recommendation_reason;
+    currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
+    musicGazeTrackId = undefined;
+    clearGazeTarget();
     renderNowPlaying(result.message);
     toast(result.message);
   } catch (error) { toast(error.message); }
@@ -1058,12 +1042,6 @@ function bindEvents() {
     $('#message-content').value = node.dataset.text;
     $('#message-content').focus();
   });
-  $('#prepare-music').onclick = submitMusicSimulatedSpeech;
-  document.querySelectorAll('.music-speech-preset').forEach((node) => node.onclick = () => {
-    $('#music-content').value = node.dataset.text;
-    $('#music-content').focus();
-  });
-
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
   $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
@@ -1102,7 +1080,6 @@ async function init() {
   renderContacts();
   activeMode = data.state.active_mode;
   renderModes();
-  renderGenres();
   bindEvents();
   updateCameraControls(false);
   if (gazeMapper) $('#gaze-feedback').textContent = '已加载本机视线校准记录；如更换坐姿、摄像头或屏幕，请重新校准。';

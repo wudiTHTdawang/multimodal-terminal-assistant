@@ -69,16 +69,10 @@
       <section class="page" id="music-page">
         <p class="section-label">场景 B · 明确场景模式 + 本地音乐偏好</p>
         <h2>音乐</h2>
-        <p>选择专注、开车或娱乐模式后，再通过注视音乐卡片和语音“播放这个”选择音乐。每次播放、喜欢或跳过都会只在当前模式下记录偏好。</p>
+        <p>选择专注、开车或娱乐模式后，系统会从本地模拟音乐平台检索一首适合当前状态的歌曲。推荐会结合当前模式的偏好歌单与该模式下的平台大众常听歌曲，并随你的反馈实时更新。</p>
         <div class="mode-grid" id="modes"></div>
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
-        <div class="card-grid muted" id="genres"></div>
-        <label>模拟语音指令<textarea id="music-content" placeholder="例如：播放这个"></textarea></label>
-        <div class="speech-presets">
-          <button class="secondary music-speech-preset" data-text="播放这个">预设：播放这个</button>
-        </div>
-        <button class="primary" id="prepare-music">提交模拟语音指令</button>
         <div class="result" id="music-result"></div>
       </section>
 
