@@ -332,19 +332,24 @@ function gazeTargetScore(node, prediction) {
 }
 
 function musicCardGazeScore(node, prediction) {
-  if (!prediction.point || prediction.confidence < 0.58) return 0;
+  if (!prediction.point || prediction.confidence < 0.46) return 0;
   const rect = node.getBoundingClientRect();
-  // 只接受卡片中间 76% 的区域，避免仅看页面附近就被当成在看歌曲。
-  const insetX = rect.width * 0.12;
-  const insetY = rect.height * 0.12;
+  // 九点校准只能提供近似落点。这里把整个“正在播放”卡片作为目标，
+  // 仅在边缘增加少量容差，不再错误地把卡片内部区域缩小。
+  const toleranceX = Math.min(28, rect.width * 0.04);
+  const toleranceY = Math.min(18, rect.height * 0.10);
   const x = prediction.point.x * window.innerWidth;
   const y = prediction.point.y * window.innerHeight;
-  const inside = x >= rect.left + insetX && x <= rect.right - insetX
-    && y >= rect.top + insetY && y <= rect.bottom - insetY;
-  if (!inside) return 0;
-  const centerDistance = Math.hypot(x - (rect.left + rect.width / 2), y - (rect.top + rect.height / 2));
-  const maxDistance = Math.hypot((rect.width - insetX * 2) / 2, (rect.height - insetY * 2) / 2) || 1;
-  return 0.72 + prediction.confidence * 0.18 + Math.max(0, 1 - centerDistance / maxDistance) * 0.10;
+  const insideEstimatedPoint = x >= rect.left - toleranceX && x <= rect.right + toleranceX
+    && y >= rect.top - toleranceY && y <= rect.bottom + toleranceY;
+  // 连续估计在边界可能有偏差，再使用当前最可能校准分区作一次宽松兜底。
+  const zonePoint = zoneCenter(prediction.zone);
+  const zoneX = zonePoint.x * window.innerWidth;
+  const zoneY = zonePoint.y * window.innerHeight;
+  const insideBestZone = zoneX >= rect.left && zoneX <= rect.right
+    && zoneY >= rect.top && zoneY <= rect.bottom;
+  if (!insideEstimatedPoint && !insideBestZone) return 0;
+  return 0.78 + prediction.confidence * 0.20;
 }
 
 function targetMetadata(node) {
@@ -612,7 +617,7 @@ function updateGazeTarget(prediction) {
   })).sort((left, right) => right.score - left.score);
   const bestCandidate = rankedCandidates[0];
   const secondCandidate = rankedCandidates[1];
-  const minimumScore = strictMusicGaze ? 0.78 : 0.16;
+  const minimumScore = strictMusicGaze ? 0.87 : 0.16;
   if (!bestCandidate || bestCandidate.score < minimumScore) {
     clearGazeTarget();
     $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
@@ -629,7 +634,7 @@ function updateGazeTarget(prediction) {
     $('#gaze-feedback').textContent = `正在留意：${label}`;
     return;
   }
-  const requiredDwellMs = strictMusicGaze ? 1300 : 700;
+  const requiredDwellMs = strictMusicGaze ? 950 : 700;
   if (!gazeTargetLocked && performance.now() - gazeTargetSince >= requiredDwellMs) {
     gazeTargetLocked = true;
     if (closest.classList.contains('contact')) {
@@ -1061,7 +1066,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '请持续注视歌曲卡片约 1.3 秒，随后点头表示喜欢，摇头表示不喜欢。';
+    : '请持续注视整个歌曲播放卡片约 1 秒，随后点头表示喜欢，摇头表示不喜欢。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
