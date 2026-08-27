@@ -203,12 +203,14 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
 
     if intent in {"confirm", "cancel"}:
         pending = state.get("pending_message")
-        if not pending:
+        if intent == "confirm" and not pending:
             return {"message": "当前没有待确认的消息操作。", "intent": intent, "explanation": ["未检测到待确认任务。"]}
         state["pending_message"] = None
         state["selected_contact"] = None
         save_state(state)
-        message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送。"
+        if intent == "cancel" and not pending:
+            return {"message": "已取消当前联系人选择，可以重新选择联系人。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到取消指令：{speech['payload']['text']}", "已清除当前联系人选择。"]}
+        message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送，并清除当前联系人选择。"
         return {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
 
     if intent in {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all"}:
