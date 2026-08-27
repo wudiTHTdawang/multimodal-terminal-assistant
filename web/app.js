@@ -249,7 +249,16 @@ function predictGazePoint(features) {
     item.zone,
     Math.max(0.05, (1 - item.distance / maxDistance) * (gazeMapper.zone_stats[item.zone]?.reliability ?? 1)),
   ]));
-  return { zone: best.zone, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)), zoneScores };
+  // 九点校准不仅用于粗粒度分区，也用最近的多个校准点估计连续落点。
+  // 音乐卡片将使用这个连续落点做严格的“落在卡片内”判断。
+  const nearby = ranked.slice(0, 4);
+  const totalWeight = nearby.reduce((sum, item) => sum + 1 / Math.max(item.distance, 0.0001) ** 2, 0);
+  const point = nearby.reduce((result, item) => {
+    const weight = (1 / Math.max(item.distance, 0.0001) ** 2) / totalWeight;
+    const center = zoneCenter(item.zone);
+    return { x: result.x + center.x * weight, y: result.y + center.y * weight };
+  }, { x: 0, y: 0 });
+  return { zone: best.zone, point, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)), zoneScores };
 }
 
 function clearGazeTarget() {
@@ -320,6 +329,22 @@ function gazeTargetScore(node, prediction) {
   const centerPrior = Math.max(0, 1 - Math.hypot(target.x - 0.5, target.y - 0.5) / 0.71);
   const zoneScore = prediction.zoneScores[elementZone(node)] || 0;
   return zoneScore * 0.62 + proximity * 0.28 + centerPrior * 0.10;
+}
+
+function musicCardGazeScore(node, prediction) {
+  if (!prediction.point || prediction.confidence < 0.58) return 0;
+  const rect = node.getBoundingClientRect();
+  // 只接受卡片中间 76% 的区域，避免仅看页面附近就被当成在看歌曲。
+  const insetX = rect.width * 0.12;
+  const insetY = rect.height * 0.12;
+  const x = prediction.point.x * window.innerWidth;
+  const y = prediction.point.y * window.innerHeight;
+  const inside = x >= rect.left + insetX && x <= rect.right - insetX
+    && y >= rect.top + insetY && y <= rect.bottom - insetY;
+  if (!inside) return 0;
+  const centerDistance = Math.hypot(x - (rect.left + rect.width / 2), y - (rect.top + rect.height / 2));
+  const maxDistance = Math.hypot((rect.width - insetX * 2) / 2, (rect.height - insetY * 2) / 2) || 1;
+  return 0.72 + prediction.confidence * 0.18 + Math.max(0, 1 - centerDistance / maxDistance) * 0.10;
 }
 
 function targetMetadata(node) {
@@ -518,7 +543,7 @@ async function lockGazeTarget(node, zone, confidence) {
     musicGazeTrackId = node.dataset.trackId;
     // 只从“确认注视歌曲卡片”这一刻开始采集头部运动，避免把此前的自然晃动误判成偏好。
     headMotionHistory = [];
-    $('#gaze-feedback').textContent = `已确认注视：${label}。点头表示喜欢，摇头将换下一首。`;
+    $('#gaze-feedback').textContent = `已确认注视：${label}。点头表示喜欢，摇头表示不喜欢并换歌。`;
   }
 }
 
@@ -579,14 +604,15 @@ function updateGazeTarget(prediction) {
   }
   if (!prediction || calibrationActive || pendingGazeSuggestion) return;
   const { zone, confidence, zoneScores } = prediction;
+  const strictMusicGaze = activePage === 'music-page';
   const rankedCandidates = eligibleGazeElements().map((node) => ({
     node,
     zone: elementZone(node),
-    score: gazeTargetScore(node, prediction),
+    score: strictMusicGaze ? musicCardGazeScore(node, prediction) : gazeTargetScore(node, prediction),
   })).sort((left, right) => right.score - left.score);
   const bestCandidate = rankedCandidates[0];
   const secondCandidate = rankedCandidates[1];
-  const minimumScore = activePage === 'music-page' ? 0.14 : 0.16;
+  const minimumScore = strictMusicGaze ? 0.78 : 0.16;
   if (!bestCandidate || bestCandidate.score < minimumScore) {
     clearGazeTarget();
     $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
@@ -603,11 +629,12 @@ function updateGazeTarget(prediction) {
     $('#gaze-feedback').textContent = `正在留意：${label}`;
     return;
   }
-  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= 700) {
+  const requiredDwellMs = strictMusicGaze ? 1300 : 700;
+  if (!gazeTargetLocked && performance.now() - gazeTargetSince >= requiredDwellMs) {
     gazeTargetLocked = true;
     if (closest.classList.contains('contact')) {
       if (Date.now() >= gazeSuggestionCooldownUntil) showContactGazeSuggestion(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
-    } else if (candidateMargin >= 0.06) {
+    } else if (strictMusicGaze || candidateMargin >= 0.06) {
       lockGazeTarget(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
     } else {
       $('#gaze-feedback').textContent = `系统已找到多个接近候选，当前优先显示：${closest.querySelector('strong')?.textContent || '该对象'}。`;
@@ -616,7 +643,16 @@ function updateGazeTarget(prediction) {
 }
 
 function observeHeadGesture(landmarks) {
-  const canAnswerMusic = Boolean(musicGazeTrackId && currentTrack?.id === musicGazeTrackId && activeMode);
+  // 音乐反馈只能发生在播放卡片仍被稳定锁定时；离开卡片后即使 musicGazeTrackId
+  // 还保留，也不接受任何头部动作。
+  const canAnswerMusic = Boolean(
+    musicGazeTrackId
+    && currentTrack?.id === musicGazeTrackId
+    && gazeTargetLocked
+    && gazeTargetElement?.classList.contains('music-track-card')
+    && gazeTargetElement.dataset.trackId === currentTrack.id
+    && activeMode
+  );
   if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
   const leftEye = landmarks[33];
   const rightEye = landmarks[263];
@@ -631,9 +667,9 @@ function observeHeadGesture(landmarks) {
     yaw: (nose.x - eyeCenterX) / eyeDistance,
     pitch: (nose.y - eyeCenterY) / eyeDistance,
   });
-  const cutoff = performance.now() - 1000;
+  const cutoff = performance.now() - 1200;
   headMotionHistory = headMotionHistory.filter((sample) => sample.time >= cutoff);
-  if (headMotionHistory.length < 6) return;
+  if (headMotionHistory.length < 8) return;
 
   const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.yaw)) - Math.min(...headMotionHistory.map((sample) => sample.yaw));
   const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.pitch)) - Math.min(...headMotionHistory.map((sample) => sample.pitch));
@@ -646,14 +682,14 @@ function observeHeadGesture(landmarks) {
   const directionalYaw = average(secondHalf, 'yaw') - average(firstHalf, 'yaw');
   const directionalPitch = average(secondHalf, 'pitch') - average(firstHalf, 'pitch');
   const gentleMusicGesture = canAnswerMusic && !pendingGazeSuggestion && !pendingMessage;
-  const verticalThreshold = gentleMusicGesture ? 0.03 : 0.04;
-  const horizontalThreshold = gentleMusicGesture ? 0.045 : 0.06;
-  const dominance = gentleMusicGesture ? 1.15 : 1.3;
+  const verticalThreshold = gentleMusicGesture ? 0.055 : 0.04;
+  const horizontalThreshold = gentleMusicGesture ? 0.075 : 0.06;
+  const dominance = gentleMusicGesture ? 1.35 : 1.3;
   const verticalGesture = Math.abs(directionalPitch) > verticalThreshold
-    && verticalRange > verticalThreshold * 1.2
+    && verticalRange > verticalThreshold * 1.45
     && Math.abs(directionalPitch) > Math.abs(directionalYaw) * dominance;
   const horizontalGesture = Math.abs(directionalYaw) > horizontalThreshold
-    && horizontalRange > horizontalThreshold * 1.2
+    && horizontalRange > horizontalThreshold * 1.45
     && Math.abs(directionalYaw) > Math.abs(directionalPitch) * dominance;
   if (verticalGesture) {
     lastHeadGestureAt = Date.now();
@@ -677,7 +713,7 @@ function observeHeadGesture(landmarks) {
     } else if (pendingMessage) {
       void finishMessageDecision('cancel_message', 'cancel', 'head');
     } else {
-      void nextTrack('head');
+      void dislikeCurrentTrack('head');
     }
   }
 }
@@ -1025,10 +1061,11 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '请先注视歌曲卡片，随后点头表示喜欢，摇头表示不喜欢并换下一首。';
-  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="skip-track">不喜欢 / 下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
+    : '请持续注视歌曲卡片约 1.3 秒，随后点头表示喜欢，摇头表示不喜欢。';
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
+  $('#dislike-track').onclick = dislikeCurrentTrack;
   $('#skip-track').onclick = nextTrack;
   startDemoPlayback();
   void recordScreenContext();
@@ -1145,11 +1182,27 @@ async function advanceAfterPlayback() {
   } catch (error) { toast(error.message); }
 }
 
-async function nextTrack(source = 'button') {
+async function dislikeCurrentTrack(source = 'button') {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
     if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
+    const result = await api('dislike_track', { current_track_id: currentTrack.id });
+    currentTrack = result.track;
+    currentRecommendationReason = result.recommendation_reason;
+    currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
+    musicGazeTrackId = undefined;
+    musicFeedbackLockedTrackId = undefined;
+    clearGazeTarget();
+    renderNowPlaying(result.message);
+    toast(result.message);
+  } catch (error) { toast(error.message); }
+}
+
+async function nextTrack() {
+  try {
+    if (!currentTrack) return;
+    stopDemoPlayback();
     const result = await api('next_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;

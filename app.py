@@ -621,6 +621,17 @@ class AssistantHandler(SimpleHTTPRequestHandler):
         if action == "next_track":
             mode = state["active_mode"] or "general"
             if not mode:
+                raise ValueError("当前没有启用音乐模式。")
+            track_id = payload["current_track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            track, reason = recommend_track(state, mode, track_id)
+            save_state(state)
+            return {"message": f"已切换到下一首：{track['title']}。本次未改变偏好。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
+
+        if action == "dislike_track":
+            mode = state["active_mode"] or "general"
+            if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
             track_id = payload["current_track_id"]
             if track_id not in tracks_by_id():
