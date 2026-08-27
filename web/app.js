@@ -21,6 +21,7 @@ let calibrationSamples = [];
 let eyeFeatureHistory = [];
 let lastLockedGaze;
 let gazeSuggestionCooldownUntil = 0;
+let contactGazePromptTimer;
 let selectedContactId;
 let selectedContactSource;
 let pendingGazeSuggestion;
@@ -46,6 +47,9 @@ let authorizedSources = [];
 
 const DEMO_TRACK_DURATION_SECONDS = 18;
 const MUSIC_GAZE_GESTURE_WINDOW_MS = 3200;
+// 联系人卡片保持为黄色候选超过该时长，就进入一次轻量确认；不再依赖后续某一帧
+// 恰好满足锁定分支，避免用户已经持续注视却没有得到任何反馈。
+const CONTACT_GAZE_PROMPT_DWELL_MS = 950;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
@@ -284,6 +288,8 @@ function predictGazePoint(features) {
 }
 
 function clearGazeTarget() {
+  clearTimeout(contactGazePromptTimer);
+  contactGazePromptTimer = undefined;
   document.querySelectorAll('.gaze-candidate, .gaze-focused').forEach((node) => {
     node.classList.remove('gaze-candidate', 'gaze-focused');
   });
@@ -403,10 +409,45 @@ function validateBrowserEvent(event) {
 async function recordBrowserEvent(event) {
   try {
     validateBrowserEvent(event);
-    await api('record_multimodal_event', { event });
+    const result = await api('record_multimodal_event', { event });
+    // 面板默认折叠，只有用户主动展开时才额外刷新，避免为调试展示增加日常请求。
+    if ($('#multimodal-inspector')?.open) void refreshMultimodalInspector();
+    return result;
   } catch (error) {
     // 结构化事件失败不阻断本地交互，但会让开发者在控制台看到明确原因。
     console.warn('多模态事件未记录：', error.message);
+  }
+}
+
+function describeMultimodalEvent(event) {
+  const payload = event.payload || {};
+  if (event.modality === 'gaze') return `注视 ${payload.target_type === 'contact' ? '联系人' : '页面对象'}：${payload.target_id || '未命名对象'}（停留 ${payload.dwell_ms || 0}ms）`;
+  if (event.modality === 'screen_context') return `页面上下文：${payload.page || 'unknown'}，可见 ${payload.visible_targets?.length || 0} 个对象`;
+  if (event.modality === 'speech_text') return `模拟语音：${payload.text || '空文本'}`;
+  if (event.modality === 'head_gesture') return `头部动作：${payload.decision === 'confirm' ? '点头确认' : '摇头拒绝'}`;
+  return '未知结构化事件';
+}
+
+function renderMultimodalInspector(events) {
+  const target = $('#multimodal-event-list');
+  if (!target) return;
+  if (!events?.length) {
+    target.textContent = '最近 10 秒暂未记录事件。';
+    return;
+  }
+  target.innerHTML = [...events].reverse().map((event) => {
+    const time = new Date(event.timestamp_ms).toLocaleTimeString('zh-CN', { hour12: false });
+    return `<article class="multimodal-event"><strong>${escapeHtml(event.modality)}</strong><span>${escapeHtml(describeMultimodalEvent(event))}</span><time>${escapeHtml(time)}</time></article>`;
+  }).join('');
+}
+
+async function refreshMultimodalInspector() {
+  try {
+    const result = await api('get_recent_multimodal_events');
+    renderMultimodalInspector(result.events);
+  } catch (error) {
+    const target = $('#multimodal-event-list');
+    if (target) target.textContent = `读取本地事件失败：${error.message}`;
   }
 }
 
@@ -613,6 +654,31 @@ function showContactGazeSuggestion(node, zone, confidence) {
   prompt.querySelector('[data-decision="reject"]').onclick = rejectGazeSuggestion;
 }
 
+function scheduleContactGazeSuggestion(node, zone, confidence) {
+  if (contactGazePromptTimer || selectedContactId || pendingMessage || pendingGazeSuggestion) return;
+  const candidateSince = gazeTargetSince;
+  const waitMs = Math.max(0, CONTACT_GAZE_PROMPT_DWELL_MS - (performance.now() - candidateSince));
+  contactGazePromptTimer = window.setTimeout(() => {
+    contactGazePromptTimer = undefined;
+    const stillLookingAtSameContact = document.querySelector('.page.active')?.id === 'message-page'
+      && gazeTargetElement === node
+      && gazeTargetSince === candidateSince
+      && node.classList.contains('gaze-candidate')
+      && !selectedContactId
+      && !pendingMessage
+      && !pendingGazeSuggestion;
+    if (!stillLookingAtSameContact) return;
+    if (Date.now() < gazeSuggestionCooldownUntil) {
+      $('#gaze-feedback').textContent = '我会继续留意你的注视。';
+      return;
+    }
+    // 提示出现前即视为该候选已稳定锁定；后续帧会因 pendingGazeSuggestion
+    // 保持本轮状态，不会重新切换到其他联系人。
+    gazeTargetLocked = true;
+    showContactGazeSuggestion(node, zone, confidence);
+  }, waitMs);
+}
+
 function updateGazeTarget(prediction) {
   const activePage = document.querySelector('.page.active')?.id;
   // 在联系人页面已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
@@ -669,6 +735,9 @@ function updateGazeTarget(prediction) {
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
     $('#gaze-feedback').textContent = `正在留意：${label}`;
+    if (closest.classList.contains('contact')) {
+      scheduleContactGazeSuggestion(closest, bestCandidate.zone, confidence);
+    }
     return;
   }
   gazeCandidateScores.push({ time: performance.now(), score: bestCandidate.score });
@@ -679,7 +748,9 @@ function updateGazeTarget(prediction) {
     if (strictMusicGaze && (gazeCandidateScores.length < 7 || averageScore < 0.72)) return;
     gazeTargetLocked = true;
     if (closest.classList.contains('contact')) {
-      if (Date.now() >= gazeSuggestionCooldownUntil) showContactGazeSuggestion(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
+      // 联系人提示由候选出现时启动的稳定停留计时器统一触发。这样即使后续
+      // 检测帧有轻微波动，用户也不会长时间只看到黄色框而得不到反馈。
+      return;
     } else if (strictMusicGaze || candidateMargin >= 0.06) {
       // 音乐页以 1.2 秒平均空间匹配分锁定最高分卡片，而不是单帧原型置信度。
       lockGazeTarget(closest, bestCandidate.zone, strictMusicGaze ? averageScore : Math.max(confidence, candidateMargin));
@@ -1397,6 +1468,10 @@ function bindEvents() {
   }));
 
   $('#prepare-message').onclick = submitSimulatedSpeech;
+  $('#refresh-multimodal-events').onclick = refreshMultimodalInspector;
+  $('#multimodal-inspector').addEventListener('toggle', (event) => {
+    if (event.currentTarget.open) void refreshMultimodalInspector();
+  });
   document.querySelectorAll('.speech-preset').forEach((node) => node.onclick = () => {
     $('#message-content').value = node.dataset.text;
     $('#message-content').focus();

@@ -64,6 +64,12 @@
         </div>
         <button class="primary" id="prepare-message">提交模拟语音指令</button>
         <div class="result" id="message-result"></div>
+        <details class="multimodal-inspector" id="multimodal-inspector">
+          <summary>查看本轮本地多模态处理记录</summary>
+          <p>仅显示最近 10 秒的结构化事件，用于演示与联调；不会展示或保存摄像头画面、人脸关键点或原始音频。</p>
+          <button class="secondary" id="refresh-multimodal-events">刷新记录</button>
+          <div class="multimodal-event-list" id="multimodal-event-list">展开后可查看本轮事件。</div>
+        </details>
       </section>
 
       <section class="page" id="music-page">
