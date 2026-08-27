@@ -36,6 +36,7 @@ let headMotionHistory = [];
 let lastHeadGestureAt = 0;
 let messageDecisionInProgress = false;
 let musicGazeTrackId;
+let musicGestureReadyAt = 0;
 // 歌曲卡片锁定后，头部动作会暂时改变眼部特征。短暂保留锁定，避免点头/摇头
 // 被下一帧的视线估计误认为“离开了卡片”。
 let musicGazeGestureWindowUntil = 0;
@@ -65,7 +66,9 @@ const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
 const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
 const HAND_GESTURE_INTERVAL_MS = 180;
 const HAND_GESTURE_DWELL_MS = 480;
+const HAND_PALM_DWELL_MS = 300;
 const HAND_GESTURE_COOLDOWN_MS = 1500;
+const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
@@ -318,6 +321,7 @@ function clearGazeTarget() {
   gazeCandidateZone = undefined;
   gazeCandidateReliabilityUpdatedAt = 0;
   musicGazeGestureWindowUntil = 0;
+  musicGestureReadyAt = 0;
 }
 
 function clearGazeSuggestion() {
@@ -446,7 +450,7 @@ function validateBrowserEvent(event) {
     throw new Error('浏览器事件缺少 payload。');
   }
   if (['head_gesture', 'hand_gesture'].includes(event.modality)
-    && (!['message', 'music'].includes(event.payload.page) || !['confirm', 'reject', 'toggle_playback'].includes(event.payload.decision))) {
+    && (!['message', 'music'].includes(event.payload.page) || !['confirm', 'reject', 'toggle_playback', 'skip_track'].includes(event.payload.decision))) {
     throw new Error('视觉确认事件缺少页面或支持的操作结果。');
   }
 }
@@ -663,6 +667,8 @@ async function lockGazeTarget(node, zone, confidence) {
     // 进入明确的“等待反馈”窗口：这段时间只识别点头/摇头，不再用每一帧的
     // 眼部特征重新竞争卡片，避免头部动作本身冲掉已经确认的注视锁定。
     musicGazeGestureWindowUntil = performance.now() + MUSIC_GAZE_GESTURE_WINDOW_MS;
+    // 锁定视线后先留出短暂基线期，让用户自然调整坐姿的微动不被误认为点头/摇头。
+    musicGestureReadyAt = performance.now() + MUSIC_HEAD_GESTURE_WARMUP_MS;
     // 只从“确认注视歌曲卡片”这一刻开始采集头部运动，避免把此前的自然晃动误判成偏好。
     headMotionHistory = [];
     $('#gaze-feedback').textContent = `已确认注视：${label}。请在 3 秒内点头表示喜欢，摇头表示不喜欢并换歌。`;
@@ -845,14 +851,17 @@ function observeHeadGesture(landmarks) {
   const directionalYaw = average(secondHalf, 'yaw') - average(firstHalf, 'yaw');
   const directionalPitch = average(secondHalf, 'pitch') - average(firstHalf, 'pitch');
   const gentleMusicGesture = canAnswerMusic && !pendingGazeSuggestion && !pendingMessage;
-  const verticalThreshold = gentleMusicGesture ? 0.055 : 0.04;
-  const horizontalThreshold = gentleMusicGesture ? 0.075 : 0.06;
-  const dominance = gentleMusicGesture ? 1.35 : 1.3;
+  // 音乐卡片锁定后不应把自然坐姿微调当成偏好。音乐反馈使用更大的幅度、
+  // 更强的主方向要求；消息页仍保持原有确认手势灵敏度。
+  const verticalThreshold = gentleMusicGesture ? 0.075 : 0.04;
+  const horizontalThreshold = gentleMusicGesture ? 0.10 : 0.06;
+  const dominance = gentleMusicGesture ? 1.5 : 1.3;
+  const rangeMultiplier = gentleMusicGesture ? 1.7 : 1.45;
   const verticalGesture = Math.abs(directionalPitch) > verticalThreshold
-    && verticalRange > verticalThreshold * 1.45
+    && verticalRange > verticalThreshold * rangeMultiplier
     && Math.abs(directionalPitch) > Math.abs(directionalYaw) * dominance;
   const horizontalGesture = Math.abs(directionalYaw) > horizontalThreshold
-    && horizontalRange > horizontalThreshold * 1.45
+    && horizontalRange > horizontalThreshold * rangeMultiplier
     && Math.abs(directionalYaw) > Math.abs(directionalPitch) * dominance;
   if (verticalGesture) {
     lastHeadGestureAt = Date.now();
@@ -1032,7 +1041,7 @@ async function toggleHandGestures() {
     lastHandDetectionAt = 0;
     handGestureCandidate = undefined;
     updateCameraControls(true);
-    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，张开手掌暂停或继续播放。');
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，掌心正对镜头暂停 / 继续，食指向上切下一首。');
   } catch (error) {
     handGesturesEnabled = false;
     updateCameraControls(true);
@@ -1048,6 +1057,7 @@ function canAnswerMusicFeedback() {
     && gazeTargetElement?.classList.contains('music-track-card')
     && gazeTargetElement.dataset.trackId === currentTrack.id
     && activeMode
+    && performance.now() >= musicGestureReadyAt
     && performance.now() < musicGazeGestureWindowUntil
   );
 }
@@ -1085,29 +1095,63 @@ async function applyHandGesture(gesture, confidence) {
       return true;
     }
   }
-  if (gesture === 'Open_Palm' && activeMode && currentTrack) {
-    await recordHandGesture('toggle_playback', 'Open_Palm', 'music_playback', 'music', confidence);
+  if (gesture === 'Palm_Front' && activeMode && currentTrack) {
+    await recordHandGesture('toggle_playback', 'Palm_Front', 'music_playback', 'music', confidence);
     toggleDemoPlayback();
+    return true;
+  }
+  if (gesture === 'Pointing_Up' && canAnswerMusicFeedback()) {
+    await recordHandGesture('skip_track', 'Pointing_Up', 'music_skip', 'music', confidence);
+    await nextTrack();
     return true;
   }
   return false;
 }
 
+function isPalmFacingCamera(result) {
+  const landmarks = result.handLandmarks?.[0];
+  if (!landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) return false;
+  const wrist = landmarks[0];
+  const indexMcp = landmarks[5];
+  const pinkyMcp = landmarks[17];
+  const indexVector = { x: indexMcp.x - wrist.x, y: indexMcp.y - wrist.y, z: indexMcp.z - wrist.z };
+  const pinkyVector = { x: pinkyMcp.x - wrist.x, y: pinkyMcp.y - wrist.y, z: pinkyMcp.z - wrist.z };
+  const normal = {
+    x: indexVector.y * pinkyVector.z - indexVector.z * pinkyVector.y,
+    y: indexVector.z * pinkyVector.x - indexVector.x * pinkyVector.z,
+    z: indexVector.x * pinkyVector.y - indexVector.y * pinkyVector.x,
+  };
+  const magnitude = Math.hypot(normal.x, normal.y, normal.z);
+  // 掌心面对镜头时，掌平面的法向量主要沿摄像头深度轴；取绝对值兼容左右手与镜像预览。
+  return magnitude > 0.0001 && Math.abs(normal.z) / magnitude >= 0.62;
+}
+
 function observeHandGesture(result, now) {
   const category = result.gestures?.[0]?.[0];
-  const gesture = category?.categoryName;
+  let gesture = category?.categoryName;
   const confidence = category?.score || 0;
-  if (!['Thumb_Up', 'Thumb_Down', 'Open_Palm'].includes(gesture) || confidence < 0.72) {
+  if (gesture === 'Open_Palm') {
+    if (!isPalmFacingCamera(result)) {
+      handGestureCandidate = undefined;
+      setHandGestureStatus('已检测到张开手掌，请让掌心正对摄像头。');
+      return;
+    }
+    gesture = 'Palm_Front';
+  }
+  const minimumConfidence = gesture === 'Palm_Front' ? 0.66 : 0.72;
+  if (!['Thumb_Up', 'Thumb_Down', 'Palm_Front', 'Pointing_Up'].includes(gesture) || confidence < minimumConfidence) {
     handGestureCandidate = undefined;
     return;
   }
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
     handGestureCandidate = { gesture, confidence, since: now };
-    setHandGestureStatus(`检测到${gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : '张开手掌'}，请保持片刻确认。`);
+    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '掌心正对镜头' : '食指向上';
+    setHandGestureStatus(`检测到${label}，请保持片刻确认。`);
     return;
   }
   handGestureCandidate.confidence = Math.min(handGestureCandidate.confidence, confidence);
-  if (now - handGestureCandidate.since < HAND_GESTURE_DWELL_MS || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
+  const dwellMs = gesture === 'Palm_Front' ? HAND_PALM_DWELL_MS : HAND_GESTURE_DWELL_MS;
+  if (now - handGestureCandidate.since < dwellMs || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
   const stableGesture = handGestureCandidate;
   handGestureCandidate = undefined;
   lastHandGestureAt = now;
@@ -1379,7 +1423,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '请持续注视整个歌曲播放卡片约 1.2 秒，随后点头表示喜欢，摇头表示不喜欢。';
+    : '请持续注视整个歌曲播放卡片约 1.2 秒，随后明显点头表示喜欢，摇头表示不喜欢。开启手势后：掌心正对镜头可暂停 / 继续，食指向上可切下一首。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;

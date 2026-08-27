@@ -130,7 +130,7 @@ def record_multimodal_event(event):
     if modality == "speech_text" and not str(payload.get("text", "")).strip():
         raise ValueError("speech_text 事件必须包含非空 text。")
     if modality in {"head_gesture", "hand_gesture"}:
-        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject", "toggle_playback"}:
+        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject", "toggle_playback", "skip_track"}:
             raise ValueError("视觉手势事件必须包含支持的页面和决策。")
 
     received_at_ms = current_time_ms()

@@ -90,6 +90,23 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         self.assertEqual(result["event"]["modality"], "hand_gesture")
         self.assertEqual(result["event"]["payload"]["gesture"], "Thumb_Up")
 
+    def test_hand_pointing_up_can_request_next_track(self):
+        now = int(time.time() * 1000)
+
+        result = app.record_multimodal_event({
+            "modality": "hand_gesture",
+            "timestamp_ms": now,
+            "confidence": 0.81,
+            "payload": {
+                "page": "music",
+                "decision": "skip_track",
+                "gesture": "Pointing_Up",
+                "purpose": "music_skip",
+            },
+        })
+
+        self.assertEqual(result["event"]["payload"]["decision"], "skip_track")
+
 
 if __name__ == "__main__":
     unittest.main()
