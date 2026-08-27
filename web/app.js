@@ -14,6 +14,7 @@ let previousGazeMapper;
 let gazeTargetElement;
 let gazeTargetSince = 0;
 let gazeTargetLocked = false;
+let gazeCandidateScores = [];
 let calibrationActive = false;
 let calibrationTimer;
 let calibrationSamples = [];
@@ -51,7 +52,7 @@ const FACE_WASM_URLS = [
   `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
   `https://unpkg.com/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
 ];
-const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v3';
+const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v4';
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 const CALIBRATION_POINTS = [
   { x: 0.16, y: 0.24 }, { x: 0.50, y: 0.24 }, { x: 0.84, y: 0.24 },
@@ -100,7 +101,7 @@ function setCameraContext(label) {
 function loadGazeCalibration() {
   try {
     const saved = JSON.parse(localStorage.getItem(GAZE_CALIBRATION_STORAGE_KEY));
-    if (saved?.version === 3 && saved.prototypes && saved.zone_stats) return saved;
+    if (saved?.version === 4 && saved.prototypes && saved.zone_stats && saved.linear_x && saved.linear_y) return saved;
   } catch { /* 本地校准损坏时忽略并要求重新校准。 */ }
   return undefined;
 }
@@ -218,6 +219,23 @@ function solveLinearSystem(matrix, vector) {
   return augmented.map((row) => row[size]);
 }
 
+function fitLinearGazeAxis(samples, target) {
+  const dimension = samples[0].features.length + 1;
+  const matrix = Array.from({ length: dimension }, () => Array(dimension).fill(0));
+  const vector = Array(dimension).fill(0);
+  samples.forEach((sample) => {
+    const row = [1, ...sample.features];
+    const value = target(sample);
+    row.forEach((left, i) => {
+      vector[i] += left * value;
+      row.forEach((right, j) => { matrix[i][j] += left * right; });
+    });
+  });
+  // 轻微正则化：避免九个样本的眼部特征接近时矩阵不可逆。
+  matrix.forEach((row, index) => { row[index] += 0.001; });
+  return solveLinearSystem(matrix, vector);
+}
+
 function fitGazeMapper(samples) {
   const prototypes = {};
   samples.forEach((sample) => {
@@ -227,8 +245,10 @@ function fitGazeMapper(samples) {
     throw new Error('校准区域不完整，请重新完成 9 点校准。');
   }
   return {
-    version: 3,
+    version: 4,
     prototypes,
+    linear_x: fitLinearGazeAxis(samples, (sample) => sample.screenX / window.innerWidth),
+    linear_y: fitLinearGazeAxis(samples, (sample) => sample.screenY / window.innerHeight),
     zone_stats: Object.fromEntries(Object.keys(prototypes).map((zone) => [zone, { reliability: 1, success: 0, cancel: 0 }])),
     saved_at_ms: Date.now(),
   };
@@ -249,15 +269,13 @@ function predictGazePoint(features) {
     item.zone,
     Math.max(0.05, (1 - item.distance / maxDistance) * (gazeMapper.zone_stats[item.zone]?.reliability ?? 1)),
   ]));
-  // 九点校准不仅用于粗粒度分区，也用最近的多个校准点估计连续落点。
-  // 音乐卡片将使用这个连续落点做严格的“落在卡片内”判断。
-  const nearby = ranked.slice(0, 4);
-  const totalWeight = nearby.reduce((sum, item) => sum + 1 / Math.max(item.distance, 0.0001) ** 2, 0);
-  const point = nearby.reduce((result, item) => {
-    const weight = (1 / Math.max(item.distance, 0.0001) ** 2) / totalWeight;
-    const center = zoneCenter(item.zone);
-    return { x: result.x + center.x * weight, y: result.y + center.y * weight };
-  }, { x: 0, y: 0 });
+  // 以九点校准拟合出的线性映射得到连续屏幕坐标。这个坐标用于卡片几何匹配；
+  // confidence 仅保留为“样本分离程度”，不再单独决定音乐卡片是否锁定。
+  const row = [1, ...features];
+  const point = {
+    x: gazeMapper.linear_x.reduce((sum, coefficient, index) => sum + coefficient * row[index], 0),
+    y: gazeMapper.linear_y.reduce((sum, coefficient, index) => sum + coefficient * row[index], 0),
+  };
   return { zone: best.zone, point, confidence: Math.max(0, Math.min(1, (0.4 + margin * 0.6) * reliability)), zoneScores };
 }
 
@@ -268,6 +286,7 @@ function clearGazeTarget() {
   gazeTargetElement = undefined;
   gazeTargetLocked = false;
   gazeTargetSince = 0;
+  gazeCandidateScores = [];
 }
 
 function clearGazeSuggestion() {
@@ -332,24 +351,17 @@ function gazeTargetScore(node, prediction) {
 }
 
 function musicCardGazeScore(node, prediction) {
-  if (!prediction.point || prediction.confidence < 0.46) return 0;
+  if (!prediction.point) return 0;
   const rect = node.getBoundingClientRect();
-  // 九点校准只能提供近似落点。这里把整个“正在播放”卡片作为目标，
-  // 仅在边缘增加少量容差，不再错误地把卡片内部区域缩小。
-  const toleranceX = Math.min(28, rect.width * 0.04);
-  const toleranceY = Math.min(18, rect.height * 0.10);
   const x = prediction.point.x * window.innerWidth;
   const y = prediction.point.y * window.innerHeight;
-  const insideEstimatedPoint = x >= rect.left - toleranceX && x <= rect.right + toleranceX
-    && y >= rect.top - toleranceY && y <= rect.bottom + toleranceY;
-  // 连续估计在边界可能有偏差，再使用当前最可能校准分区作一次宽松兜底。
-  const zonePoint = zoneCenter(prediction.zone);
-  const zoneX = zonePoint.x * window.innerWidth;
-  const zoneY = zonePoint.y * window.innerHeight;
-  const insideBestZone = zoneX >= rect.left && zoneX <= rect.right
-    && zoneY >= rect.top && zoneY <= rect.bottom;
-  if (!insideEstimatedPoint && !insideBestZone) return 0;
-  return 0.78 + prediction.confidence * 0.20;
+  const point = { x, y };
+  const distance = distanceToRect(point, rect);
+  // 整张播放卡片均为有效区域，并允许约一个文本行高度的校准误差。
+  const tolerance = Math.max(32, Math.min(72, Math.min(rect.width, rect.height) * 0.35));
+  if (distance > tolerance) return 0;
+  const spatialMatch = 1 - distance / tolerance;
+  return 0.62 + spatialMatch * 0.30 + prediction.confidence * 0.08;
 }
 
 function targetMetadata(node) {
@@ -617,7 +629,7 @@ function updateGazeTarget(prediction) {
   })).sort((left, right) => right.score - left.score);
   const bestCandidate = rankedCandidates[0];
   const secondCandidate = rankedCandidates[1];
-  const minimumScore = strictMusicGaze ? 0.87 : 0.16;
+  const minimumScore = strictMusicGaze ? 0.64 : 0.16;
   if (!bestCandidate || bestCandidate.score < minimumScore) {
     clearGazeTarget();
     $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
@@ -629,18 +641,24 @@ function updateGazeTarget(prediction) {
     clearGazeTarget();
     gazeTargetElement = closest;
     gazeTargetSince = performance.now();
+    gazeCandidateScores = [{ time: gazeTargetSince, score: bestCandidate.score }];
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
     $('#gaze-feedback').textContent = `正在留意：${label}`;
     return;
   }
-  const requiredDwellMs = strictMusicGaze ? 950 : 700;
+  gazeCandidateScores.push({ time: performance.now(), score: bestCandidate.score });
+  gazeCandidateScores = gazeCandidateScores.filter((sample) => sample.time >= gazeTargetSince);
+  const requiredDwellMs = strictMusicGaze ? 1200 : 700;
   if (!gazeTargetLocked && performance.now() - gazeTargetSince >= requiredDwellMs) {
+    const averageScore = gazeCandidateScores.reduce((sum, sample) => sum + sample.score, 0) / gazeCandidateScores.length;
+    if (strictMusicGaze && (gazeCandidateScores.length < 7 || averageScore < 0.72)) return;
     gazeTargetLocked = true;
     if (closest.classList.contains('contact')) {
       if (Date.now() >= gazeSuggestionCooldownUntil) showContactGazeSuggestion(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
     } else if (strictMusicGaze || candidateMargin >= 0.06) {
-      lockGazeTarget(closest, bestCandidate.zone, Math.max(confidence, candidateMargin));
+      // 音乐页以 1.2 秒平均空间匹配分锁定最高分卡片，而不是单帧原型置信度。
+      lockGazeTarget(closest, bestCandidate.zone, strictMusicGaze ? averageScore : Math.max(confidence, candidateMargin));
     } else {
       $('#gaze-feedback').textContent = `系统已找到多个接近候选，当前优先显示：${closest.querySelector('strong')?.textContent || '该对象'}。`;
     }
@@ -746,7 +764,7 @@ function finishCalibration(success, message) {
   $('#gaze-calibration').hidden = true;
   if (success) {
     saveGazeCalibration();
-    $('#gaze-feedback').textContent = '9 点校准完成。请注视页面中的卡片，停留约 1.5 秒。';
+    $('#gaze-feedback').textContent = '9 点校准完成。请注视页面中的卡片，系统会以约 1.2 秒的稳定落点锁定最高匹配对象。';
     setCameraStatus('视线校准已完成，可识别当前页面注视对象', 'active');
   } else {
     gazeMapper = previousGazeMapper;
@@ -1066,7 +1084,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '请持续注视整个歌曲播放卡片约 1 秒，随后点头表示喜欢，摇头表示不喜欢。';
+    : '请持续注视整个歌曲播放卡片约 1.2 秒，随后点头表示喜欢，摇头表示不喜欢。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
