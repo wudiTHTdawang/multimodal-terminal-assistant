@@ -11,7 +11,9 @@ let handGestureRecognizer;
 let handGesturesEnabled = false;
 let lastHandDetectionAt = 0;
 let handGestureCandidate;
+let handGestureLatched;
 let lastHandGestureAt = 0;
+let handMotionHistory = [];
 let lastFacePresence;
 let latestEyeFeatures;
 let gazeMapper;
@@ -69,7 +71,11 @@ const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
 const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
 const HAND_GESTURE_INTERVAL_MS = 180;
 const HAND_GESTURE_DWELL_MS = 480;
-const HAND_PALM_DWELL_MS = 300;
+const HAND_PALM_DWELL_MS = 400;
+const HAND_WAVE_DWELL_MS = 260;
+const HAND_WAVE_WINDOW_MS = 680;
+const HAND_WAVE_MIN_HORIZONTAL_SPAN = 0.20;
+const HAND_WAVE_MAX_VERTICAL_SPAN = 0.18;
 const HAND_GESTURE_COOLDOWN_MS = 1500;
 const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
 
@@ -1122,7 +1128,8 @@ async function enableHandGestures() {
     handGesturesEnabled = true;
     lastHandDetectionAt = 0;
     handGestureCandidate = undefined;
-    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，掌心正对镜头暂停 / 继续，食指向上切下一首。');
+    handGestureLatched = undefined;
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，掌心正对镜头暂停 / 继续，横向挥动张开的手掌切下一首。');
   } catch (error) {
     handGesturesEnabled = false;
     setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
@@ -1202,16 +1209,15 @@ async function applyHandGesture(gesture, confidence) {
     toggleDemoPlayback();
     return true;
   }
-  if (gesture === 'Pointing_Up' && canControlSelectedMusicTrack()) {
-    await recordHandGesture('skip_track', 'Pointing_Up', 'music_skip', 'music', confidence);
+  if (gesture === 'Palm_Wave' && canControlSelectedMusicTrack()) {
+    await recordHandGesture('skip_track', 'Palm_Wave', 'music_skip', 'music', confidence);
     await nextTrack();
     return true;
   }
   return false;
 }
 
-function isPalmFacingCamera(result) {
-  const landmarks = result.handLandmarks?.[0];
+function isPalmFacingCamera(landmarks) {
   if (!landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) return false;
   const wrist = landmarks[0];
   const indexMcp = landmarks[5];
@@ -1225,37 +1231,86 @@ function isPalmFacingCamera(result) {
   };
   const magnitude = Math.hypot(normal.x, normal.y, normal.z);
   // 掌心面对镜头时，掌平面的法向量主要沿摄像头深度轴；取绝对值兼容左右手与镜像预览。
-  return magnitude > 0.0001 && Math.abs(normal.z) / magnitude >= 0.62;
+  // 摄像头、手掌大小及轻微倾斜都会影响深度坐标；0.34 能容忍自然的手腕角度，
+  // 但仍要求手掌平面明显朝向镜头。
+  return magnitude > 0.0001 && Math.abs(normal.z) / magnitude >= 0.34;
+}
+
+function pointDistance(left, right) {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
+function isLikelyOpenPalm(landmarks) {
+  if (!landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) return false;
+  const wrist = landmarks[0];
+  const extendedFingerPairs = [[8, 6], [12, 10], [16, 14], [20, 18]];
+  const extendedCount = extendedFingerPairs.filter(([tip, joint]) => (
+    pointDistance(wrist, landmarks[tip]) > pointDistance(wrist, landmarks[joint]) * 1.18
+  )).length;
+  const palmWidth = pointDistance(landmarks[5], landmarks[17]);
+  const fingertipSpread = pointDistance(landmarks[8], landmarks[20]);
+  return extendedCount >= 3 && palmWidth > 0.02 && fingertipSpread > palmWidth * 1.05;
+}
+
+function detectPalmWave(landmarks, now, openPalm) {
+  if (!openPalm || !landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) {
+    handMotionHistory = [];
+    return false;
+  }
+  const center = {
+    x: (landmarks[0].x + landmarks[5].x + landmarks[17].x) / 3,
+    y: (landmarks[0].y + landmarks[5].y + landmarks[17].y) / 3,
+    timestamp: now,
+  };
+  handMotionHistory.push(center);
+  handMotionHistory = handMotionHistory.filter((sample) => now - sample.timestamp <= HAND_WAVE_WINDOW_MS);
+  if (handMotionHistory.length < 3) return false;
+  const xs = handMotionHistory.map((sample) => sample.x);
+  const ys = handMotionHistory.map((sample) => sample.y);
+  const horizontalSpan = Math.max(...xs) - Math.min(...xs);
+  const verticalSpan = Math.max(...ys) - Math.min(...ys);
+  return horizontalSpan >= HAND_WAVE_MIN_HORIZONTAL_SPAN && verticalSpan <= HAND_WAVE_MAX_VERTICAL_SPAN;
 }
 
 function observeHandGesture(result, now) {
+  const landmarks = result.handLandmarks?.[0];
   const category = result.gestures?.[0]?.[0];
   let gesture = category?.categoryName;
   const confidence = category?.score || 0;
-  if (gesture === 'Open_Palm') {
-    if (!isPalmFacingCamera(result)) {
+  const openPalm = gesture === 'Open_Palm' || isLikelyOpenPalm(landmarks);
+  if (detectPalmWave(landmarks, now, openPalm)) {
+    gesture = 'Palm_Wave';
+  } else if (openPalm) {
+    if (!isPalmFacingCamera(landmarks)) {
       handGestureCandidate = undefined;
       setHandGestureStatus('已检测到张开手掌，请让掌心正对摄像头。');
       return;
     }
     gesture = 'Palm_Front';
   }
-  const minimumConfidence = gesture === 'Palm_Front' ? 0.66 : 0.72;
-  if (!['Thumb_Up', 'Thumb_Down', 'Palm_Front', 'Pointing_Up'].includes(gesture) || confidence < minimumConfidence) {
+  const minimumConfidence = gesture === 'Palm_Front' ? 0.50 : gesture === 'Palm_Wave' ? 0 : 0.72;
+  if (!['Thumb_Up', 'Thumb_Down', 'Palm_Front', 'Palm_Wave'].includes(gesture) || confidence < minimumConfidence) {
+    handGestureCandidate = undefined;
+    handGestureLatched = undefined;
+    return;
+  }
+  // 每次动作只触发一次；用户放下手或改成非识别姿势后，才允许下一次操作。
+  if (handGestureLatched) {
     handGestureCandidate = undefined;
     return;
   }
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
     handGestureCandidate = { gesture, confidence, since: now };
-    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '掌心正对镜头' : '食指向上';
+    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '掌心正对镜头' : '横向挥手';
     setHandGestureStatus(`检测到${label}，请保持片刻确认。`);
     return;
   }
   handGestureCandidate.confidence = Math.min(handGestureCandidate.confidence, confidence);
-  const dwellMs = gesture === 'Palm_Front' ? HAND_PALM_DWELL_MS : HAND_GESTURE_DWELL_MS;
+  const dwellMs = gesture === 'Palm_Front' ? HAND_PALM_DWELL_MS : gesture === 'Palm_Wave' ? HAND_WAVE_DWELL_MS : HAND_GESTURE_DWELL_MS;
   if (now - handGestureCandidate.since < dwellMs || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
   const stableGesture = handGestureCandidate;
   handGestureCandidate = undefined;
+  handGestureLatched = stableGesture.gesture;
   lastHandGestureAt = now;
   void applyHandGesture(stableGesture.gesture, stableGesture.confidence).then((handled) => {
     setHandGestureStatus(handled
@@ -1379,6 +1434,8 @@ function stopCamera(showMessage = true) {
   lastFacePresence = undefined;
   handGesturesEnabled = false;
   handGestureCandidate = undefined;
+  handGestureLatched = undefined;
+  handMotionHistory = [];
   lastHandDetectionAt = 0;
   latestEyeFeatures = undefined;
   eyeFeatureHistory = [];
@@ -1529,7 +1586,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '持续注视歌曲播放卡片约 0.7 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：掌心正对镜头可暂停 / 继续，食指向上可切下一首。';
+    : '持续注视歌曲播放卡片约 0.7 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：掌心正对镜头可暂停 / 继续，横向挥动张开的手掌可切下一首。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${musicCardSelected ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
