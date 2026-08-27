@@ -21,7 +21,8 @@ let calibrationSamples = [];
 let eyeFeatureHistory = [];
 let lastLockedGaze;
 let gazeSuggestionCooldownUntil = 0;
-let contactGazePromptTimer;
+let contactGazeCandidateNode;
+let contactGazeCandidateStartedAt = 0;
 let selectedContactId;
 let selectedContactSource;
 let pendingGazeSuggestion;
@@ -47,9 +48,8 @@ let authorizedSources = [];
 
 const DEMO_TRACK_DURATION_SECONDS = 18;
 const MUSIC_GAZE_GESTURE_WINDOW_MS = 3200;
-// 联系人卡片保持为黄色候选超过该时长，就进入一次轻量确认；不再依赖后续某一帧
-// 恰好满足锁定分支，避免用户已经持续注视却没有得到任何反馈。
-const CONTACT_GAZE_PROMPT_DWELL_MS = 950;
+// 联系人卡片以黄色候选状态保持此时长后，立即询问用户，不再等待另一套锁定条件。
+const CONTACT_GAZE_PROMPT_DWELL_MS = 800;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
@@ -288,8 +288,6 @@ function predictGazePoint(features) {
 }
 
 function clearGazeTarget() {
-  clearTimeout(contactGazePromptTimer);
-  contactGazePromptTimer = undefined;
   document.querySelectorAll('.gaze-candidate, .gaze-focused').forEach((node) => {
     node.classList.remove('gaze-candidate', 'gaze-focused');
   });
@@ -297,6 +295,8 @@ function clearGazeTarget() {
   gazeTargetLocked = false;
   gazeTargetSince = 0;
   gazeCandidateScores = [];
+  contactGazeCandidateNode = undefined;
+  contactGazeCandidateStartedAt = 0;
   musicGazeGestureWindowUntil = 0;
 }
 
@@ -654,31 +654,6 @@ function showContactGazeSuggestion(node, zone, confidence) {
   prompt.querySelector('[data-decision="reject"]').onclick = rejectGazeSuggestion;
 }
 
-function scheduleContactGazeSuggestion(node, zone, confidence) {
-  if (contactGazePromptTimer || selectedContactId || pendingMessage || pendingGazeSuggestion) return;
-  const candidateSince = gazeTargetSince;
-  const waitMs = Math.max(0, CONTACT_GAZE_PROMPT_DWELL_MS - (performance.now() - candidateSince));
-  contactGazePromptTimer = window.setTimeout(() => {
-    contactGazePromptTimer = undefined;
-    const stillLookingAtSameContact = document.querySelector('.page.active')?.id === 'message-page'
-      && gazeTargetElement === node
-      && gazeTargetSince === candidateSince
-      && node.classList.contains('gaze-candidate')
-      && !selectedContactId
-      && !pendingMessage
-      && !pendingGazeSuggestion;
-    if (!stillLookingAtSameContact) return;
-    if (Date.now() < gazeSuggestionCooldownUntil) {
-      $('#gaze-feedback').textContent = '我会继续留意你的注视。';
-      return;
-    }
-    // 提示出现前即视为该候选已稳定锁定；后续帧会因 pendingGazeSuggestion
-    // 保持本轮状态，不会重新切换到其他联系人。
-    gazeTargetLocked = true;
-    showContactGazeSuggestion(node, zone, confidence);
-  }, waitMs);
-}
-
 function updateGazeTarget(prediction) {
   const activePage = document.querySelector('.page.active')?.id;
   // 在联系人页面已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
@@ -736,20 +711,35 @@ function updateGazeTarget(prediction) {
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
     $('#gaze-feedback').textContent = `正在留意：${label}`;
     if (closest.classList.contains('contact')) {
-      scheduleContactGazeSuggestion(closest, bestCandidate.zone, confidence);
+      // 黄色框出现的这一刻开始计时。时间戳独立于后续的锁定分支，避免因
+      // 某个检测帧的细微抖动导致“看了很久却一直没有问题”的体验。
+      contactGazeCandidateNode = closest;
+      contactGazeCandidateStartedAt = Date.now();
     }
     return;
   }
   gazeCandidateScores.push({ time: performance.now(), score: bestCandidate.score });
   gazeCandidateScores = gazeCandidateScores.filter((sample) => sample.time >= gazeTargetSince);
+  if (closest.classList.contains('contact')
+    && contactGazeCandidateNode === closest
+    && contactGazeCandidateStartedAt > 0
+    && Date.now() - contactGazeCandidateStartedAt >= CONTACT_GAZE_PROMPT_DWELL_MS
+    && !selectedContactId
+    && !pendingMessage
+    && !pendingGazeSuggestion) {
+    if (Date.now() >= gazeSuggestionCooldownUntil) {
+      gazeTargetLocked = true;
+      showContactGazeSuggestion(closest, bestCandidate.zone, Math.max(confidence, bestCandidate.score));
+      return;
+    }
+  }
   const requiredDwellMs = strictMusicGaze ? 1200 : 700;
   if (!gazeTargetLocked && performance.now() - gazeTargetSince >= requiredDwellMs) {
     const averageScore = gazeCandidateScores.reduce((sum, sample) => sum + sample.score, 0) / gazeCandidateScores.length;
     if (strictMusicGaze && (gazeCandidateScores.length < 7 || averageScore < 0.72)) return;
     gazeTargetLocked = true;
     if (closest.classList.contains('contact')) {
-      // 联系人提示由候选出现时启动的稳定停留计时器统一触发。这样即使后续
-      // 检测帧有轻微波动，用户也不会长时间只看到黄色框而得不到反馈。
+      // 联系人由上方的黄色候选累计时间直接触发提示，避免依赖本分支。
       return;
     } else if (strictMusicGaze || candidateMargin >= 0.06) {
       // 音乐页以 1.2 秒平均空间匹配分锁定最高分卡片，而不是单帧原型置信度。
