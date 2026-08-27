@@ -28,6 +28,9 @@ let headMotionHistory = [];
 let lastHeadGestureAt = 0;
 let messageDecisionInProgress = false;
 let musicGazeTrackId;
+// 歌曲卡片锁定后，头部动作会暂时改变眼部特征。短暂保留锁定，避免点头/摇头
+// 被下一帧的视线估计误认为“离开了卡片”。
+let musicGazeGestureWindowUntil = 0;
 // 当前歌曲已收到明确的“喜欢”反馈后，直到换歌前不再用头部动作重复判断。
 let musicFeedbackLockedTrackId;
 let currentRecommendationReason = '';
@@ -42,6 +45,7 @@ let memoAuthorizationMode = 'merge';
 let authorizedSources = [];
 
 const DEMO_TRACK_DURATION_SECONDS = 18;
+const MUSIC_GAZE_GESTURE_WINDOW_MS = 3200;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
@@ -287,6 +291,7 @@ function clearGazeTarget() {
   gazeTargetLocked = false;
   gazeTargetSince = 0;
   gazeCandidateScores = [];
+  musicGazeGestureWindowUntil = 0;
 }
 
 function clearGazeSuggestion() {
@@ -558,9 +563,12 @@ async function lockGazeTarget(node, zone, confidence) {
     }
   } else if (node.classList.contains('music-track-card')) {
     musicGazeTrackId = node.dataset.trackId;
+    // 进入明确的“等待反馈”窗口：这段时间只识别点头/摇头，不再用每一帧的
+    // 眼部特征重新竞争卡片，避免头部动作本身冲掉已经确认的注视锁定。
+    musicGazeGestureWindowUntil = performance.now() + MUSIC_GAZE_GESTURE_WINDOW_MS;
     // 只从“确认注视歌曲卡片”这一刻开始采集头部运动，避免把此前的自然晃动误判成偏好。
     headMotionHistory = [];
-    $('#gaze-feedback').textContent = `已确认注视：${label}。点头表示喜欢，摇头表示不喜欢并换歌。`;
+    $('#gaze-feedback').textContent = `已确认注视：${label}。请在 3 秒内点头表示喜欢，摇头表示不喜欢并换歌。`;
   }
 }
 
@@ -619,6 +627,22 @@ function updateGazeTarget(prediction) {
     clearGazeTarget();
     return;
   }
+  const musicGestureWindowOpen = activePage === 'music-page'
+    && gazeTargetLocked
+    && musicGazeTrackId
+    && currentTrack?.id === musicGazeTrackId
+    && performance.now() < musicGazeGestureWindowUntil;
+  // 已锁定歌曲卡片时，给用户一个短暂且明确的反馈窗口。点头或摇头会明显改变
+  // 眼睛、鼻子的相对位置，因此窗口内不再重算注视目标；超时后恢复正常注视判断。
+  if (musicGestureWindowOpen) return;
+  if (activePage === 'music-page'
+    && gazeTargetLocked
+    && musicGazeTrackId
+    && currentTrack?.id === musicGazeTrackId
+    && musicGazeGestureWindowUntil > 0) {
+    clearGazeTarget();
+    musicGazeTrackId = undefined;
+  }
   if (!prediction || calibrationActive || pendingGazeSuggestion) return;
   const { zone, confidence, zoneScores } = prediction;
   const strictMusicGaze = activePage === 'music-page';
@@ -666,8 +690,8 @@ function updateGazeTarget(prediction) {
 }
 
 function observeHeadGesture(landmarks) {
-  // 音乐反馈只能发生在播放卡片仍被稳定锁定时；离开卡片后即使 musicGazeTrackId
-  // 还保留，也不接受任何头部动作。
+  // 音乐反馈仅在歌曲卡片锁定后的短暂窗口内接受。窗口内暂停重新判断视线，
+  // 使点头/摇头不会因为自身改变了眼部特征而丢失锁定。
   const canAnswerMusic = Boolean(
     musicGazeTrackId
     && currentTrack?.id === musicGazeTrackId
@@ -675,6 +699,7 @@ function observeHeadGesture(landmarks) {
     && gazeTargetElement?.classList.contains('music-track-card')
     && gazeTargetElement.dataset.trackId === currentTrack.id
     && activeMode
+    && performance.now() < musicGazeGestureWindowUntil
   );
   if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
   const leftEye = landmarks[33];
@@ -1035,6 +1060,7 @@ async function activateMode(mode) {
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || [];
     musicGazeTrackId = undefined;
+    musicGazeGestureWindowUntil = 0;
     musicFeedbackLockedTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
@@ -1053,6 +1079,7 @@ async function activateGeneralMusic() {
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || [];
     musicGazeTrackId = undefined;
+    musicGazeGestureWindowUntil = 0;
     musicFeedbackLockedTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
@@ -1068,6 +1095,7 @@ async function stopMode() {
     const result = await api('stop_mode');
     activeMode = undefined;
     musicGazeTrackId = undefined;
+    musicGazeGestureWindowUntil = 0;
     musicFeedbackLockedTrackId = undefined;
     switchArmed = false;
     $('#mode-decision').innerHTML = '';
