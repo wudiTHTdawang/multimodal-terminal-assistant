@@ -107,6 +107,18 @@ class MultimodalUnderstandingTests(unittest.TestCase):
 
         self.assertEqual(result["event"]["payload"]["decision"], "skip_track")
 
+    def test_music_speech_can_cancel_selected_track(self):
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append(self.event("speech_text", now, {
+            "page": "music",
+            "text": "取消当前歌曲选择",
+            "source": "simulated",
+        }))
+
+        result = app.understand_multimodal_command({"selected_contact": None, "pending_message": None}, now)
+
+        self.assertEqual(result["intent"], "cancel_music_selection")
+
 
 if __name__ == "__main__":
     unittest.main()

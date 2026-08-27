@@ -37,6 +37,8 @@ let lastHeadGestureAt = 0;
 let messageDecisionInProgress = false;
 let musicGazeTrackId;
 let musicGestureReadyAt = 0;
+let selectedMusicTrackId;
+let pendingMusicGazeSuggestion;
 // 歌曲卡片锁定后，头部动作会暂时改变眼部特征。短暂保留锁定，避免点头/摇头
 // 被下一帧的视线估计误认为“离开了卡片”。
 let musicGazeGestureWindowUntil = 0;
@@ -118,8 +120,6 @@ function updateCameraControls(active) {
   $('#start-camera').disabled = active;
   $('#calibrate-gaze').disabled = !active;
   $('#clear-gaze-calibration').disabled = !gazeMapper;
-  $('#toggle-hand-gestures').disabled = !active;
-  $('#toggle-hand-gestures').textContent = handGesturesEnabled ? '关闭手势' : '开启手势';
   $('#stop-camera').disabled = !active;
   $('#camera-panel').hidden = !active;
 }
@@ -322,6 +322,17 @@ function clearGazeTarget() {
   gazeCandidateReliabilityUpdatedAt = 0;
   musicGazeGestureWindowUntil = 0;
   musicGestureReadyAt = 0;
+}
+
+function clearMusicTrackSelection(message) {
+  document.querySelectorAll('.music-track-card.music-selected').forEach((node) => node.classList.remove('music-selected'));
+  document.querySelector('.music-gaze-prompt')?.remove();
+  selectedMusicTrackId = undefined;
+  pendingMusicGazeSuggestion = undefined;
+  musicGazeTrackId = undefined;
+  musicGestureReadyAt = 0;
+  clearGazeTarget();
+  if (message) $('#gaze-feedback').textContent = message;
 }
 
 function clearGazeSuggestion() {
@@ -617,6 +628,35 @@ async function submitSimulatedSpeech() {
   }
 }
 
+async function submitSimulatedMusicCommand() {
+  const text = $('#music-command').value.trim();
+  if (!text) {
+    toast('请输入或选择一条音乐模拟语音指令。');
+    return;
+  }
+  const timestamp = Date.now();
+  try {
+    await recordBrowserEvent({
+      modality: 'speech_text',
+      timestamp_ms: timestamp,
+      confidence: 1,
+      payload: { text, page: 'music', source: 'simulated' },
+    });
+    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    $('#music-command').value = '';
+    if (result.intent === 'cancel_music_selection') {
+      clearMusicTrackSelection(result.message);
+      toast(result.message);
+      return;
+    }
+    if (result.intent === 'next_track') {
+      await nextTrack();
+      return;
+    }
+    toast(result.message);
+  } catch (error) { toast(error.message); }
+}
+
 function distanceToRect(point, rect) {
   const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
   const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
@@ -716,6 +756,42 @@ function showContactGazeSuggestion(node, zone, confidence) {
   prompt.querySelector('[data-decision="reject"]').onclick = rejectGazeSuggestion;
 }
 
+function dismissMusicGazeSuggestion(message) {
+  document.querySelector('.music-gaze-prompt')?.remove();
+  pendingMusicGazeSuggestion = undefined;
+  clearGazeTarget();
+  if (message) $('#gaze-feedback').textContent = message;
+}
+
+async function selectMusicTrackForInteraction(node, zone, confidence) {
+  document.querySelector('.music-gaze-prompt')?.remove();
+  pendingMusicGazeSuggestion = undefined;
+  if (!currentTrack || node.dataset.trackId !== currentTrack.id) return;
+  await lockGazeTarget(node, zone, confidence);
+  selectedMusicTrackId = currentTrack.id;
+  node.classList.add('music-selected');
+  musicGazeTrackId = currentTrack.id;
+  // 已明确确认后，不再靠不断变化的视线重判；直到语音取消或歌曲切换。
+  musicGestureReadyAt = performance.now() + MUSIC_HEAD_GESTURE_WARMUP_MS;
+  $('#gaze-feedback').textContent = `已选中：${currentTrack.title}。现在可使用明显点头/摇头或手势操作；可说“取消当前歌曲选择”解除。`;
+}
+
+function showMusicGazeSuggestion(node, zone, confidence) {
+  if (selectedMusicTrackId || pendingMusicGazeSuggestion || !currentTrack || node.dataset.trackId !== currentTrack.id) return;
+  const prompt = document.createElement('section');
+  prompt.className = 'music-gaze-prompt';
+  prompt.innerHTML = `<strong>似乎想操作《${currentTrack.title}》</strong><p>要选中这首歌吗？</p><div><button class="primary" data-decision="confirm">选中</button><button class="secondary" data-decision="reject">暂不</button></div><small>选中后将保持，直到说“取消当前歌曲选择”或切换歌曲。</small>`;
+  document.body.append(prompt);
+  positionGazePrompt(prompt, node);
+  pendingMusicGazeSuggestion = { node, zone, confidence };
+  headMotionHistory = [];
+  prompt.querySelector('[data-decision="confirm"]').onclick = async () => {
+    const suggestion = pendingMusicGazeSuggestion;
+    if (suggestion) await selectMusicTrackForInteraction(suggestion.node, suggestion.zone, suggestion.confidence);
+  };
+  prompt.querySelector('[data-decision="reject"]').onclick = () => dismissMusicGazeSuggestion('好的，暂不选中这首歌。');
+}
+
 function updateGazeTarget(prediction) {
   const activePage = document.querySelector('.page.active')?.id;
   // 在联系人页面已选联系人或已有待发送消息时，不能让新的注视结果改变本轮消息对象。
@@ -724,6 +800,10 @@ function updateGazeTarget(prediction) {
     clearGazeTarget();
     return;
   }
+  // 明确选中歌曲后，暂停视线竞争，后续仅接收语音和手势，直到用户取消选择或切歌。
+  if (activePage === 'music-page' && selectedMusicTrackId === currentTrack?.id) return;
+  if (activePage === 'music-page' && selectedMusicTrackId && selectedMusicTrackId !== currentTrack?.id) clearMusicTrackSelection();
+  if (pendingMusicGazeSuggestion) return;
   // 喜欢当前歌曲后，保留播放状态，但不再重新锁定同一张歌曲卡片。
   // 下一首歌出现时会清除此标记，届时才会再次允许“注视 + 点头/摇头”。
   if (activePage === 'music-page' && currentTrack?.id === musicFeedbackLockedTrackId) {
@@ -801,15 +881,19 @@ function updateGazeTarget(prediction) {
       return;
     }
   }
-  const requiredDwellMs = strictMusicGaze ? 1200 : 700;
+  const requiredDwellMs = 700;
   if (!gazeTargetLocked && performance.now() - gazeTargetSince >= requiredDwellMs) {
     const averageScore = gazeCandidateScores.reduce((sum, sample) => sum + sample.score, 0) / gazeCandidateScores.length;
-    if (strictMusicGaze && (gazeCandidateScores.length < 7 || averageScore < 0.68)) return;
+    if (strictMusicGaze && (gazeCandidateScores.length < 4 || averageScore < 0.64)) return;
     gazeTargetLocked = true;
+    if (strictMusicGaze) {
+      showMusicGazeSuggestion(closest, bestCandidate.zone, averageScore);
+      return;
+    }
     if (closest.classList.contains('contact')) {
       // 联系人由上方的黄色候选累计时间直接触发提示，避免依赖本分支。
       return;
-    } else if (strictMusicGaze || candidateMargin >= 0.06) {
+    } else if (candidateMargin >= 0.06) {
       // 音乐页以 1.2 秒平均空间匹配分锁定最高分卡片，而不是单帧原型置信度。
       lockGazeTarget(closest, bestCandidate.zone, strictMusicGaze ? averageScore : Math.max(confidence, candidateMargin));
     } else {
@@ -822,7 +906,7 @@ function observeHeadGesture(landmarks) {
   // 音乐反馈仅在歌曲卡片锁定后的短暂窗口内接受。窗口内暂停重新判断视线，
   // 使点头/摇头不会因为自身改变了眼部特征而丢失锁定。
   const canAnswerMusic = canAnswerMusicFeedback();
-  if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
+  if ((!pendingGazeSuggestion && !pendingMusicGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
   const leftEye = landmarks[33];
   const rightEye = landmarks[263];
   const nose = landmarks[1];
@@ -872,6 +956,9 @@ function observeHeadGesture(landmarks) {
         await recordHeadDecision('confirm', 'contact_selection');
         await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
       })();
+    } else if (pendingMusicGazeSuggestion) {
+      const suggestion = pendingMusicGazeSuggestion;
+      void selectMusicTrackForInteraction(suggestion.node, suggestion.zone, suggestion.confidence);
     } else if (pendingMessage) {
       void finishMessageDecision('confirm_send', 'success', 'head');
     } else {
@@ -882,6 +969,8 @@ function observeHeadGesture(landmarks) {
     if (pendingGazeSuggestion) {
       void recordHeadDecision('reject', 'contact_selection');
       rejectGazeSuggestion();
+    } else if (pendingMusicGazeSuggestion) {
+      dismissMusicGazeSuggestion('好的，暂不选中这首歌。');
     } else if (pendingMessage) {
       void finishMessageDecision('cancel_message', 'cancel', 'head');
     } else {
@@ -1022,34 +1111,30 @@ async function initializeHandGestureRecognizer() {
   throw new Error(`手势运行时无法加载。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
 }
 
-async function toggleHandGestures() {
+async function enableHandGestures() {
   if (!cameraStream) {
-    toast('请先开启摄像头，再启用手势识别。');
     return;
   }
-  if (handGesturesEnabled) {
-    handGesturesEnabled = false;
-    handGestureCandidate = undefined;
-    updateCameraControls(true);
-    setHandGestureStatus('手势识别已关闭。');
-    return;
-  }
+  if (handGesturesEnabled) return;
   try {
     setHandGestureStatus('正在加载本机手势模型…');
     await initializeHandGestureRecognizer();
     handGesturesEnabled = true;
     lastHandDetectionAt = 0;
     handGestureCandidate = undefined;
-    updateCameraControls(true);
     setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，掌心正对镜头暂停 / 继续，食指向上切下一首。');
   } catch (error) {
     handGesturesEnabled = false;
-    updateCameraControls(true);
     setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
   }
 }
 
 function canAnswerMusicFeedback() {
+  if (selectedMusicTrackId === currentTrack?.id && activeMode) {
+    // 刚确认歌曲时先略过几帧，避免确认动作本身被误识别为喜欢或不喜欢。
+    return performance.now() >= musicGestureReadyAt
+      && currentTrack?.id !== musicFeedbackLockedTrackId;
+  }
   return Boolean(
     musicGazeTrackId
     && currentTrack?.id === musicGazeTrackId
@@ -1062,6 +1147,14 @@ function canAnswerMusicFeedback() {
   );
 }
 
+function canControlSelectedMusicTrack() {
+  return Boolean(
+    activeMode
+    && currentTrack
+    && (selectedMusicTrackId === currentTrack.id || canAnswerMusicFeedback())
+  );
+}
+
 async function applyHandGesture(gesture, confidence) {
   if (gesture === 'Thumb_Up') {
     if (pendingGazeSuggestion) {
@@ -1069,6 +1162,11 @@ async function applyHandGesture(gesture, confidence) {
       clearGazeSuggestion();
       await recordHandGesture('confirm', 'Thumb_Up', 'contact_selection', 'message', confidence);
       await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+      return true;
+    }
+    if (pendingMusicGazeSuggestion) {
+      const suggestion = pendingMusicGazeSuggestion;
+      await selectMusicTrackForInteraction(suggestion.node, suggestion.zone, suggestion.confidence);
       return true;
     }
     if (pendingMessage) {
@@ -1086,6 +1184,10 @@ async function applyHandGesture(gesture, confidence) {
       rejectGazeSuggestion();
       return true;
     }
+    if (pendingMusicGazeSuggestion) {
+      dismissMusicGazeSuggestion('好的，暂不选中这首歌。');
+      return true;
+    }
     if (pendingMessage) {
       await finishMessageDecision('cancel_message', 'cancel', 'hand');
       return true;
@@ -1100,7 +1202,7 @@ async function applyHandGesture(gesture, confidence) {
     toggleDemoPlayback();
     return true;
   }
-  if (gesture === 'Pointing_Up' && canAnswerMusicFeedback()) {
+  if (gesture === 'Pointing_Up' && canControlSelectedMusicTrack()) {
     await recordHandGesture('skip_track', 'Pointing_Up', 'music_skip', 'music', confidence);
     await nextTrack();
     return true;
@@ -1258,6 +1360,7 @@ async function startCamera() {
     await video.play();
     updateCameraControls(true);
     startFaceDetection();
+    void enableHandGestures();
     const [track] = stream.getVideoTracks();
     track?.addEventListener('ended', () => {
       if (cameraStream === stream) stopCamera(false);
@@ -1365,6 +1468,7 @@ async function requestMode(nextMode) {
 async function activateMode(mode) {
   try {
     stopDemoPlayback();
+    clearMusicTrackSelection();
     const result = await api('start_mode', { mode, mode_label: MODE_LABELS[mode] });
     activeMode = mode;
     currentTrack = result.track;
@@ -1384,6 +1488,7 @@ async function activateMode(mode) {
 async function activateGeneralMusic() {
   try {
     stopDemoPlayback();
+    clearMusicTrackSelection();
     const result = await api('start_general_music');
     activeMode = 'general';
     currentTrack = result.track;
@@ -1403,6 +1508,7 @@ async function activateGeneralMusic() {
 async function stopMode() {
   try {
     stopDemoPlayback();
+    clearMusicTrackSelection();
     const result = await api('stop_mode');
     activeMode = undefined;
     musicGazeTrackId = undefined;
@@ -1423,8 +1529,8 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '请持续注视整个歌曲播放卡片约 1.2 秒，随后明显点头表示喜欢，摇头表示不喜欢。开启手势后：掌心正对镜头可暂停 / 继续，食指向上可切下一首。';
-  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
+    : '持续注视歌曲卡片约 0.7 秒后，系统会询问是否选中；确认后保持选中，直到说“取消当前歌曲选择”或切换歌曲。开启手势后：掌心正对镜头可暂停 / 继续，食指向上可切下一首。';
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${selectedMusicTrackId === currentTrack.id ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
   $('#dislike-track').onclick = dislikeCurrentTrack;
@@ -1519,6 +1625,7 @@ async function completeCurrentTrack() {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
+    clearMusicTrackSelection();
     const result = await api('complete_track', { track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
@@ -1534,6 +1641,7 @@ async function completeCurrentTrack() {
 async function advanceAfterPlayback() {
   try {
     if (!currentTrack) return;
+    clearMusicTrackSelection();
     const result = await api('advance_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
@@ -1549,6 +1657,7 @@ async function dislikeCurrentTrack(source = 'button') {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
+    clearMusicTrackSelection();
     if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
     if (source === 'hand') await recordHandGesture('reject', 'Thumb_Down', 'music_feedback', 'music');
     const result = await api('dislike_track', { current_track_id: currentTrack.id });
@@ -1567,6 +1676,7 @@ async function nextTrack() {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
+    clearMusicTrackSelection();
     const result = await api('next_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
@@ -1718,10 +1828,14 @@ function bindEvents() {
     $('#message-content').value = node.dataset.text;
     $('#message-content').focus();
   });
+  $('#prepare-music-command').onclick = submitSimulatedMusicCommand;
+  document.querySelectorAll('.music-speech-preset').forEach((node) => node.onclick = () => {
+    $('#music-command').value = node.dataset.text;
+    $('#music-command').focus();
+  });
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
   $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
-  $('#toggle-hand-gestures').onclick = toggleHandGestures;
   $('#stop-camera').onclick = () => stopCamera();
   $('#cancel-calibration').onclick = () => finishCalibration(false, '已取消视线校准。');
 

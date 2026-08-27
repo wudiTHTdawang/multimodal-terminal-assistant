@@ -15,11 +15,10 @@
       <div class="header-tools">
         <div class="camera-switcher" aria-label="全局摄像头控制">
           <p id="camera-status" class="camera-status" role="status">摄像头未开启</p>
-          <button class="camera-button" id="start-camera">开启摄像头</button>
+          <button class="camera-button" id="start-camera">开启摄像头与手势</button>
           <button class="camera-button" id="calibrate-gaze" disabled>校准视线</button>
           <button class="camera-button" id="clear-gaze-calibration" disabled>清除校准</button>
-          <button class="camera-button" id="toggle-hand-gestures" disabled>开启手势</button>
-          <button class="camera-button" id="stop-camera" disabled>关闭</button>
+          <button class="camera-button" id="stop-camera" disabled>关闭摄像头与手势</button>
         </div>
         <label class="profile-select">演示用户 <select id="profile"></select></label>
       </div>
@@ -82,6 +81,12 @@
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
         <div class="result" id="music-result"></div>
+        <label>模拟语音指令<textarea id="music-command" placeholder="例如：取消当前歌曲选择"></textarea></label>
+        <div class="speech-presets">
+          <button class="secondary music-speech-preset" data-text="取消当前歌曲选择">预设：取消歌曲选择</button>
+          <button class="secondary music-speech-preset" data-text="下一首">预设：下一首</button>
+        </div>
+        <button class="primary" id="prepare-music-command">提交模拟语音指令</button>
       </section>
 
       <section class="page" id="memo-page">

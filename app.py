@@ -160,6 +160,10 @@ def find_contact(contact_id):
 
 def parse_simulated_speech(text):
     normalized = re.sub(r"\s+", "", text)
+    if normalized in {"取消当前歌曲选择", "取消歌曲选择", "取消音乐选择", "不选这首", "不操作这首"}:
+        return "cancel_music_selection", ""
+    if normalized in {"下一首", "切下一首", "换一首"}:
+        return "next_track", ""
     if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
         return "cancel", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
@@ -200,6 +204,11 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
         raise ValueError("未找到对应的模拟语音事件，请重新提交。")
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
     intent, content = parse_simulated_speech(str(speech["payload"].get("text", "")))
+
+    if intent == "cancel_music_selection":
+        return {"message": "已取消当前歌曲选择；你可以重新注视并确认另一首歌曲。", "intent": intent, "explanation": [f"识别到音乐取消指令：{speech['payload']['text']}"]}
+    if intent == "next_track":
+        return {"message": "已识别切换下一首指令。", "intent": intent, "explanation": [f"识别到音乐指令：{speech['payload']['text']}"]}
 
     if intent in {"confirm", "cancel"}:
         pending = state.get("pending_message")
