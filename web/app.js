@@ -37,7 +37,8 @@ let lastHeadGestureAt = 0;
 let messageDecisionInProgress = false;
 let musicGazeTrackId;
 let musicGestureReadyAt = 0;
-let selectedMusicTrackId;
+// 选中的是“正在播放”交互卡片，而不是某一首具体歌曲；切歌后仍持续有效。
+let musicCardSelected = false;
 let pendingMusicGazeSuggestion;
 // 歌曲卡片锁定后，头部动作会暂时改变眼部特征。短暂保留锁定，避免点头/摇头
 // 被下一帧的视线估计误认为“离开了卡片”。
@@ -327,7 +328,7 @@ function clearGazeTarget() {
 function clearMusicTrackSelection(message) {
   document.querySelectorAll('.music-track-card.music-selected').forEach((node) => node.classList.remove('music-selected'));
   document.querySelector('.music-gaze-prompt')?.remove();
-  selectedMusicTrackId = undefined;
+  musicCardSelected = false;
   pendingMusicGazeSuggestion = undefined;
   musicGazeTrackId = undefined;
   musicGestureReadyAt = 0;
@@ -768,19 +769,19 @@ async function selectMusicTrackForInteraction(node, zone, confidence) {
   pendingMusicGazeSuggestion = undefined;
   if (!currentTrack || node.dataset.trackId !== currentTrack.id) return;
   await lockGazeTarget(node, zone, confidence);
-  selectedMusicTrackId = currentTrack.id;
+  musicCardSelected = true;
   node.classList.add('music-selected');
   musicGazeTrackId = currentTrack.id;
   // 已明确确认后，不再靠不断变化的视线重判；直到语音取消或歌曲切换。
   musicGestureReadyAt = performance.now() + MUSIC_HEAD_GESTURE_WARMUP_MS;
-  $('#gaze-feedback').textContent = `已选中：${currentTrack.title}。现在可使用明显点头/摇头或手势操作；可说“取消当前歌曲选择”解除。`;
+  $('#gaze-feedback').textContent = '已选中正在播放卡片。现在无论切换到哪首歌，都可使用点头/摇头或手势操作；可说“取消当前歌曲选择”解除。';
 }
 
 function showMusicGazeSuggestion(node, zone, confidence) {
-  if (selectedMusicTrackId || pendingMusicGazeSuggestion || !currentTrack || node.dataset.trackId !== currentTrack.id) return;
+  if (musicCardSelected || pendingMusicGazeSuggestion || !currentTrack || node.dataset.trackId !== currentTrack.id) return;
   const prompt = document.createElement('section');
   prompt.className = 'music-gaze-prompt';
-  prompt.innerHTML = `<strong>似乎想操作《${currentTrack.title}》</strong><p>要选中这首歌吗？</p><div><button class="primary" data-decision="confirm">选中</button><button class="secondary" data-decision="reject">暂不</button></div><small>选中后将保持，直到说“取消当前歌曲选择”或切换歌曲。</small>`;
+  prompt.innerHTML = `<strong>似乎想操作正在播放的音乐</strong><p>要选中这个播放卡片吗？</p><div><button class="primary" data-decision="confirm">选中</button><button class="secondary" data-decision="reject">暂不</button></div><small>选中后会持续保留；说“取消当前歌曲选择”即可解除。</small>`;
   document.body.append(prompt);
   positionGazePrompt(prompt, node);
   pendingMusicGazeSuggestion = { node, zone, confidence };
@@ -800,9 +801,8 @@ function updateGazeTarget(prediction) {
     clearGazeTarget();
     return;
   }
-  // 明确选中歌曲后，暂停视线竞争，后续仅接收语音和手势，直到用户取消选择或切歌。
-  if (activePage === 'music-page' && selectedMusicTrackId === currentTrack?.id) return;
-  if (activePage === 'music-page' && selectedMusicTrackId && selectedMusicTrackId !== currentTrack?.id) clearMusicTrackSelection();
+  // 明确选中播放卡片后，暂停视线竞争，后续仅接收语音和手势，直到用户取消选择或停止模式。
+  if (activePage === 'music-page' && musicCardSelected) return;
   if (pendingMusicGazeSuggestion) return;
   // 喜欢当前歌曲后，保留播放状态，但不再重新锁定同一张歌曲卡片。
   // 下一首歌出现时会清除此标记，届时才会再次允许“注视 + 点头/摇头”。
@@ -1130,7 +1130,7 @@ async function enableHandGestures() {
 }
 
 function canAnswerMusicFeedback() {
-  if (selectedMusicTrackId === currentTrack?.id && activeMode) {
+  if (musicCardSelected && currentTrack && activeMode) {
     // 刚确认歌曲时先略过几帧，避免确认动作本身被误识别为喜欢或不喜欢。
     return performance.now() >= musicGestureReadyAt
       && currentTrack?.id !== musicFeedbackLockedTrackId;
@@ -1151,7 +1151,7 @@ function canControlSelectedMusicTrack() {
   return Boolean(
     activeMode
     && currentTrack
-    && (selectedMusicTrackId === currentTrack.id || canAnswerMusicFeedback())
+    && (musicCardSelected || canAnswerMusicFeedback())
   );
 }
 
@@ -1529,8 +1529,8 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '持续注视歌曲卡片约 0.7 秒后，系统会询问是否选中；确认后保持选中，直到说“取消当前歌曲选择”或切换歌曲。开启手势后：掌心正对镜头可暂停 / 继续，食指向上可切下一首。';
-  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${selectedMusicTrackId === currentTrack.id ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
+    : '持续注视歌曲播放卡片约 0.7 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：掌心正对镜头可暂停 / 继续，食指向上可切下一首。';
+  $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${musicCardSelected ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
   $('#dislike-track').onclick = dislikeCurrentTrack;
@@ -1625,7 +1625,6 @@ async function completeCurrentTrack() {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
-    clearMusicTrackSelection();
     const result = await api('complete_track', { track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
@@ -1641,7 +1640,6 @@ async function completeCurrentTrack() {
 async function advanceAfterPlayback() {
   try {
     if (!currentTrack) return;
-    clearMusicTrackSelection();
     const result = await api('advance_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
@@ -1657,7 +1655,6 @@ async function dislikeCurrentTrack(source = 'button') {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
-    clearMusicTrackSelection();
     if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
     if (source === 'hand') await recordHandGesture('reject', 'Thumb_Down', 'music_feedback', 'music');
     const result = await api('dislike_track', { current_track_id: currentTrack.id });
@@ -1676,7 +1673,6 @@ async function nextTrack() {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
-    clearMusicTrackSelection();
     const result = await api('next_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
