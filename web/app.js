@@ -14,6 +14,7 @@ let handGestureCandidate;
 let handGestureLatched;
 let lastHandGestureAt = 0;
 let handMotionHistory = [];
+let handGestureSuppressHeadUntil = 0;
 let lastFacePresence;
 let latestEyeFeatures;
 let gazeMapper;
@@ -69,14 +70,16 @@ const MUSIC_GAZE_MINIMUM_SCORE = 0.58;
 // 只在持续候选超过一个较长的间隔后才学习一次，避免把每帧检测噪声写入校准记录。
 const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
 const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
-const HAND_GESTURE_INTERVAL_MS = 180;
-const HAND_GESTURE_DWELL_MS = 480;
-const HAND_PALM_DWELL_MS = 400;
-const HAND_WAVE_DWELL_MS = 260;
+const HAND_GESTURE_INTERVAL_MS = 120;
+const HAND_GESTURE_DWELL_MS = 360;
+const HAND_PALM_DWELL_MS = 320;
+const HAND_WAVE_DWELL_MS = 180;
+const HAND_GESTURE_CANDIDATE_GAP_MS = 360;
 const HAND_WAVE_WINDOW_MS = 680;
 const HAND_WAVE_MIN_HORIZONTAL_SPAN = 0.20;
 const HAND_WAVE_MAX_VERTICAL_SPAN = 0.18;
-const HAND_GESTURE_COOLDOWN_MS = 1500;
+const HAND_GESTURE_COOLDOWN_MS = 650;
+const HAND_GESTURE_HEAD_SUPPRESS_MS = 900;
 const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
 
 const FACE_TASK_VERSION = '1.0.1';
@@ -911,6 +914,8 @@ function updateGazeTarget(prediction) {
 function observeHeadGesture(landmarks) {
   // 音乐反馈仅在歌曲卡片锁定后的短暂窗口内接受。窗口内暂停重新判断视线，
   // 使点头/摇头不会因为自身改变了眼部特征而丢失锁定。
+  // 抬手、挥手会带动上半身与脸部关键点；手势识别期间不把这类变化误当成摇头。
+  if (performance.now() < handGestureSuppressHeadUntil) return;
   const canAnswerMusic = canAnswerMusicFeedback();
   if ((!pendingGazeSuggestion && !pendingMusicGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
   const leftEye = landmarks[33];
@@ -1129,6 +1134,7 @@ async function enableHandGestures() {
     lastHandDetectionAt = 0;
     handGestureCandidate = undefined;
     handGestureLatched = undefined;
+    handGestureSuppressHeadUntil = 0;
     setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，掌心正对镜头暂停 / 继续，横向挥动张开的手掌切下一首。');
   } catch (error) {
     handGesturesEnabled = false;
@@ -1282,6 +1288,9 @@ function observeHandGesture(result, now) {
     gesture = 'Palm_Wave';
   } else if (openPalm) {
     if (!isPalmFacingCamera(landmarks)) {
+      // 允许掌心在两次采样间轻微转动，避免“请保持”状态被一帧噪声反复清空。
+      if (handGestureCandidate?.gesture === 'Palm_Front'
+        && now - handGestureCandidate.lastSeen <= HAND_GESTURE_CANDIDATE_GAP_MS) return;
       handGestureCandidate = undefined;
       setHandGestureStatus('已检测到张开手掌，请让掌心正对摄像头。');
       return;
@@ -1290,22 +1299,25 @@ function observeHandGesture(result, now) {
   }
   const minimumConfidence = gesture === 'Palm_Front' ? 0.50 : gesture === 'Palm_Wave' ? 0 : 0.72;
   if (!['Thumb_Up', 'Thumb_Down', 'Palm_Front', 'Palm_Wave'].includes(gesture) || confidence < minimumConfidence) {
+    if (handGestureCandidate && now - handGestureCandidate.lastSeen <= HAND_GESTURE_CANDIDATE_GAP_MS) return;
     handGestureCandidate = undefined;
     handGestureLatched = undefined;
     return;
   }
+  handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
   // 每次动作只触发一次；用户放下手或改成非识别姿势后，才允许下一次操作。
   if (handGestureLatched) {
     handGestureCandidate = undefined;
     return;
   }
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
-    handGestureCandidate = { gesture, confidence, since: now };
+    handGestureCandidate = { gesture, confidence, since: now, lastSeen: now };
     const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '掌心正对镜头' : '横向挥手';
     setHandGestureStatus(`检测到${label}，请保持片刻确认。`);
     return;
   }
   handGestureCandidate.confidence = Math.min(handGestureCandidate.confidence, confidence);
+  handGestureCandidate.lastSeen = now;
   const dwellMs = gesture === 'Palm_Front' ? HAND_PALM_DWELL_MS : gesture === 'Palm_Wave' ? HAND_WAVE_DWELL_MS : HAND_GESTURE_DWELL_MS;
   if (now - handGestureCandidate.since < dwellMs || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
   const stableGesture = handGestureCandidate;
@@ -1345,6 +1357,8 @@ function runFaceDetection() {
   const video = $('#camera-preview');
   if (!cameraStream || !faceLandmarker || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
   const now = performance.now();
+  // 先处理手势并写入短暂的头部动作抑制标记，再处理人脸，避免挥手同帧被判成摇头。
+  runHandGestureDetection(video, now);
   if (now - lastFaceDetectionAt >= 120) {
     lastFaceDetectionAt = now;
     try {
@@ -1371,7 +1385,6 @@ function runFaceDetection() {
       return;
     }
   }
-  runHandGestureDetection(video, now);
   faceDetectionFrame = requestAnimationFrame(runFaceDetection);
 }
 
@@ -1436,6 +1449,7 @@ function stopCamera(showMessage = true) {
   handGestureCandidate = undefined;
   handGestureLatched = undefined;
   handMotionHistory = [];
+  handGestureSuppressHeadUntil = 0;
   lastHandDetectionAt = 0;
   latestEyeFeatures = undefined;
   eyeFeatureHistory = [];
