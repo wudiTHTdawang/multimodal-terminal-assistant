@@ -7,6 +7,11 @@ let cameraStream;
 let faceLandmarker;
 let faceDetectionFrame;
 let lastFaceDetectionAt = 0;
+let handGestureRecognizer;
+let handGesturesEnabled = false;
+let lastHandDetectionAt = 0;
+let handGestureCandidate;
+let lastHandGestureAt = 0;
 let lastFacePresence;
 let latestEyeFeatures;
 let gazeMapper;
@@ -58,10 +63,14 @@ const MUSIC_GAZE_MINIMUM_SCORE = 0.58;
 // 只在持续候选超过一个较长的间隔后才学习一次，避免把每帧检测噪声写入校准记录。
 const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
 const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
+const HAND_GESTURE_INTERVAL_MS = 180;
+const HAND_GESTURE_DWELL_MS = 480;
+const HAND_GESTURE_COOLDOWN_MS = 1500;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
 const FACE_MODEL_URL = '/models/face_landmarker.task';
+const HAND_GESTURE_MODEL_URL = '/models/gesture_recognizer.task';
 const FACE_BUNDLE_URL = '/vendor/mediapipe/vision_bundle.mjs';
 // WASM 体积较大，保留两个等价来源；一个无法访问时会自动尝试另一个。
 const FACE_WASM_URLS = [
@@ -106,6 +115,8 @@ function updateCameraControls(active) {
   $('#start-camera').disabled = active;
   $('#calibrate-gaze').disabled = !active;
   $('#clear-gaze-calibration').disabled = !gazeMapper;
+  $('#toggle-hand-gestures').disabled = !active;
+  $('#toggle-hand-gestures').textContent = handGesturesEnabled ? '关闭手势' : '开启手势';
   $('#stop-camera').disabled = !active;
   $('#camera-panel').hidden = !active;
 }
@@ -422,7 +433,7 @@ function targetMetadata(node) {
 }
 
 function validateBrowserEvent(event) {
-  if (!['gaze', 'screen_context', 'speech_text', 'head_gesture'].includes(event?.modality)) {
+  if (!['gaze', 'screen_context', 'speech_text', 'head_gesture', 'hand_gesture'].includes(event?.modality)) {
     throw new Error('浏览器事件模态不合法。');
   }
   if (!Number.isInteger(event.timestamp_ms) || event.timestamp_ms <= 0) {
@@ -434,8 +445,9 @@ function validateBrowserEvent(event) {
   if (!event.payload || typeof event.payload !== 'object') {
     throw new Error('浏览器事件缺少 payload。');
   }
-  if (event.modality === 'head_gesture' && (!['message', 'music'].includes(event.payload.page) || !['confirm', 'reject'].includes(event.payload.decision))) {
-    throw new Error('头部确认事件缺少页面或确认结果。');
+  if (['head_gesture', 'hand_gesture'].includes(event.modality)
+    && (!['message', 'music'].includes(event.payload.page) || !['confirm', 'reject', 'toggle_playback'].includes(event.payload.decision))) {
+    throw new Error('视觉确认事件缺少页面或支持的操作结果。');
   }
 }
 
@@ -458,6 +470,7 @@ function describeMultimodalEvent(event) {
   if (event.modality === 'screen_context') return `页面上下文：${payload.page || 'unknown'}，可见 ${payload.visible_targets?.length || 0} 个对象`;
   if (event.modality === 'speech_text') return `模拟语音：${payload.text || '空文本'}`;
   if (event.modality === 'head_gesture') return `头部动作：${payload.decision === 'confirm' ? '点头确认' : '摇头拒绝'}`;
+  if (event.modality === 'hand_gesture') return `手势输入：${payload.gesture || payload.decision}`;
   return '未知结构化事件';
 }
 
@@ -507,11 +520,21 @@ async function recordHeadDecision(decision, purpose, page = 'message') {
   });
 }
 
+async function recordHandGesture(decision, gesture, purpose, page = 'message', confidence = 0.75) {
+  await recordBrowserEvent({
+    modality: 'hand_gesture',
+    timestamp_ms: Date.now(),
+    confidence,
+    payload: { page, decision, gesture, purpose },
+  });
+}
+
 async function finishMessageDecision(action, outcome, source = 'button') {
   if (!pendingMessage || messageDecisionInProgress) return;
   messageDecisionInProgress = true;
   try {
     if (source === 'head') await recordHeadDecision(outcome === 'success' ? 'confirm' : 'reject', 'message_confirmation');
+    if (source === 'hand') await recordHandGesture(outcome === 'success' ? 'confirm' : 'reject', outcome === 'success' ? 'Thumb_Up' : 'Thumb_Down', 'message_confirmation');
     const result = await api(action, pendingMessage);
     adjustGazeReliability(outcome);
     resetMessageForm(result.message);
@@ -792,15 +815,7 @@ function updateGazeTarget(prediction) {
 function observeHeadGesture(landmarks) {
   // 音乐反馈仅在歌曲卡片锁定后的短暂窗口内接受。窗口内暂停重新判断视线，
   // 使点头/摇头不会因为自身改变了眼部特征而丢失锁定。
-  const canAnswerMusic = Boolean(
-    musicGazeTrackId
-    && currentTrack?.id === musicGazeTrackId
-    && gazeTargetLocked
-    && gazeTargetElement?.classList.contains('music-track-card')
-    && gazeTargetElement.dataset.trackId === currentTrack.id
-    && activeMode
-    && performance.now() < musicGazeGestureWindowUntil
-  );
+  const canAnswerMusic = canAnswerMusicFeedback();
   if ((!pendingGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
   const leftEye = landmarks[33];
   const rightEye = landmarks[263];
@@ -968,6 +983,153 @@ async function initializeFaceLandmarker() {
   throw new Error(`视觉运行时无法加载，请检查网络是否可访问 jsDelivr 或 unpkg。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
 }
 
+function setHandGestureStatus(message) {
+  const node = $('#hand-gesture-status');
+  if (node) node.textContent = message;
+}
+
+async function initializeHandGestureRecognizer() {
+  if (handGestureRecognizer) return;
+  const { GestureRecognizer, FilesetResolver } = await import(FACE_BUNDLE_URL);
+  const modelResponse = await fetch(HAND_GESTURE_MODEL_URL, { cache: 'no-store' });
+  if (!modelResponse.ok) throw new Error(`本地手势模型文件不可用（HTTP ${modelResponse.status}）。`);
+  let lastError;
+  for (const wasmUrl of FACE_WASM_URLS) {
+    try {
+      const vision = await FilesetResolver.forVisionTasks(wasmUrl);
+      handGestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: HAND_GESTURE_MODEL_URL },
+        runningMode: 'VIDEO',
+        numHands: 1,
+        minHandDetectionConfidence: 0.62,
+        minHandPresenceConfidence: 0.62,
+        minTrackingConfidence: 0.58,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`手势运行时无法加载。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
+}
+
+async function toggleHandGestures() {
+  if (!cameraStream) {
+    toast('请先开启摄像头，再启用手势识别。');
+    return;
+  }
+  if (handGesturesEnabled) {
+    handGesturesEnabled = false;
+    handGestureCandidate = undefined;
+    updateCameraControls(true);
+    setHandGestureStatus('手势识别已关闭。');
+    return;
+  }
+  try {
+    setHandGestureStatus('正在加载本机手势模型…');
+    await initializeHandGestureRecognizer();
+    handGesturesEnabled = true;
+    lastHandDetectionAt = 0;
+    handGestureCandidate = undefined;
+    updateCameraControls(true);
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，张开手掌暂停或继续播放。');
+  } catch (error) {
+    handGesturesEnabled = false;
+    updateCameraControls(true);
+    setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
+  }
+}
+
+function canAnswerMusicFeedback() {
+  return Boolean(
+    musicGazeTrackId
+    && currentTrack?.id === musicGazeTrackId
+    && gazeTargetLocked
+    && gazeTargetElement?.classList.contains('music-track-card')
+    && gazeTargetElement.dataset.trackId === currentTrack.id
+    && activeMode
+    && performance.now() < musicGazeGestureWindowUntil
+  );
+}
+
+async function applyHandGesture(gesture, confidence) {
+  if (gesture === 'Thumb_Up') {
+    if (pendingGazeSuggestion) {
+      const suggestion = pendingGazeSuggestion;
+      clearGazeSuggestion();
+      await recordHandGesture('confirm', 'Thumb_Up', 'contact_selection', 'message', confidence);
+      await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
+      return true;
+    }
+    if (pendingMessage) {
+      await finishMessageDecision('confirm_send', 'success', 'hand');
+      return true;
+    }
+    if (canAnswerMusicFeedback()) {
+      await likeCurrentTrack('hand');
+      return true;
+    }
+  }
+  if (gesture === 'Thumb_Down') {
+    if (pendingGazeSuggestion) {
+      await recordHandGesture('reject', 'Thumb_Down', 'contact_selection', 'message', confidence);
+      rejectGazeSuggestion();
+      return true;
+    }
+    if (pendingMessage) {
+      await finishMessageDecision('cancel_message', 'cancel', 'hand');
+      return true;
+    }
+    if (canAnswerMusicFeedback()) {
+      await dislikeCurrentTrack('hand');
+      return true;
+    }
+  }
+  if (gesture === 'Open_Palm' && activeMode && currentTrack) {
+    await recordHandGesture('toggle_playback', 'Open_Palm', 'music_playback', 'music', confidence);
+    toggleDemoPlayback();
+    return true;
+  }
+  return false;
+}
+
+function observeHandGesture(result, now) {
+  const category = result.gestures?.[0]?.[0];
+  const gesture = category?.categoryName;
+  const confidence = category?.score || 0;
+  if (!['Thumb_Up', 'Thumb_Down', 'Open_Palm'].includes(gesture) || confidence < 0.72) {
+    handGestureCandidate = undefined;
+    return;
+  }
+  if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
+    handGestureCandidate = { gesture, confidence, since: now };
+    setHandGestureStatus(`检测到${gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : '张开手掌'}，请保持片刻确认。`);
+    return;
+  }
+  handGestureCandidate.confidence = Math.min(handGestureCandidate.confidence, confidence);
+  if (now - handGestureCandidate.since < HAND_GESTURE_DWELL_MS || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
+  const stableGesture = handGestureCandidate;
+  handGestureCandidate = undefined;
+  lastHandGestureAt = now;
+  void applyHandGesture(stableGesture.gesture, stableGesture.confidence).then((handled) => {
+    setHandGestureStatus(handled
+      ? `已通过手势处理：${stableGesture.gesture}。`
+      : '已识别手势；当前没有可确认的操作。');
+  });
+}
+
+function runHandGestureDetection(video, now) {
+  if (!handGesturesEnabled || !handGestureRecognizer || now - lastHandDetectionAt < HAND_GESTURE_INTERVAL_MS) return;
+  lastHandDetectionAt = now;
+  try {
+    observeHandGesture(handGestureRecognizer.recognizeForVideo(video, now), now);
+  } catch (error) {
+    handGesturesEnabled = false;
+    updateCameraControls(Boolean(cameraStream));
+    setHandGestureStatus(`手势检测已暂停：${error.message || '未知错误'}`);
+  }
+}
+
 function updateFacePresence(hasFace) {
   if (lastFacePresence === hasFace) return;
   lastFacePresence = hasFace;
@@ -1008,6 +1170,7 @@ function runFaceDetection() {
       return;
     }
   }
+  runHandGestureDetection(video, now);
   faceDetectionFrame = requestAnimationFrame(runFaceDetection);
 }
 
@@ -1067,6 +1230,9 @@ function stopCamera(showMessage = true) {
   cancelAnimationFrame(faceDetectionFrame);
   faceDetectionFrame = undefined;
   lastFacePresence = undefined;
+  handGesturesEnabled = false;
+  handGestureCandidate = undefined;
+  lastHandDetectionAt = 0;
   latestEyeFeatures = undefined;
   eyeFeatureHistory = [];
   clearGazeTarget();
@@ -1076,6 +1242,7 @@ function stopCamera(showMessage = true) {
   const video = $('#camera-preview');
   video.srcObject = null;
   updateCameraControls(false);
+  setHandGestureStatus('手势识别未开启。');
   setCameraStatus('摄像头已关闭。', 'idle');
   if (showMessage) toast('摄像头已关闭，本机画面已停止。');
 }
@@ -1292,6 +1459,7 @@ async function likeCurrentTrack(source = 'button') {
   try {
     if (!currentTrack) return;
     if (source === 'head') await recordHeadDecision('confirm', 'music_feedback', 'music');
+    if (source === 'hand') await recordHandGesture('confirm', 'Thumb_Up', 'music_feedback', 'music');
     const result = await api('like_track', { track_id: currentTrack.id });
     playbackFeedbackRecorded = true;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
@@ -1338,6 +1506,7 @@ async function dislikeCurrentTrack(source = 'button') {
     if (!currentTrack) return;
     stopDemoPlayback();
     if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
+    if (source === 'hand') await recordHandGesture('reject', 'Thumb_Down', 'music_feedback', 'music');
     const result = await api('dislike_track', { current_track_id: currentTrack.id });
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
@@ -1508,6 +1677,7 @@ function bindEvents() {
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
   $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
+  $('#toggle-hand-gestures').onclick = toggleHandGestures;
   $('#stop-camera').onclick = () => stopCamera();
   $('#cancel-calibration').onclick = () => finishCalibration(false, '已取消视线校准。');
 

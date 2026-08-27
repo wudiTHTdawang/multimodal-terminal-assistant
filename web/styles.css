@@ -36,6 +36,7 @@ select { margin-left: 8px; padding: 8px; border: 0; border-radius: 8px; color: #
 #face-overlay { pointer-events: none; }
 .camera-privacy { margin: 0; padding: 7px 10px; color: #71809a; font-size: 11px; line-height: 1.45; }
 .gaze-feedback { min-height: 31px; margin: 0; padding: 7px 10px 0; color: #4e6498; font-size: 11px; line-height: 1.45; }
+.hand-gesture-status { min-height: 19px; margin: 0; padding: 5px 10px 0; color: #6b7890; font-size: 11px; line-height: 1.45; }
 .gaze-calibration { position: fixed; z-index: 40; inset: 0; background: #101b38cc; }
 .gaze-calibration-guide { position: fixed; z-index: 41; top: 24px; left: 50%; width: min(440px, calc(100vw - 36px)); padding: 17px 18px; transform: translateX(-50%); border-radius: 13px; color: #20325f; background: #fff; box-shadow: 0 14px 34px #00000045; text-align: center; }
 .gaze-calibration-guide p { margin: 8px 0 13px; color: #536482; line-height: 1.55; }

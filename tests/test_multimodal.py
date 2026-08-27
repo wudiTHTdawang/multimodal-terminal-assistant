@@ -72,6 +72,24 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         self.assertTrue(result["clear_message_form"])
         self.assertIsNone(state["selected_contact"])
 
+    def test_hand_gesture_event_is_accepted_without_camera_data(self):
+        now = int(time.time() * 1000)
+
+        result = app.record_multimodal_event({
+            "modality": "hand_gesture",
+            "timestamp_ms": now,
+            "confidence": 0.86,
+            "payload": {
+                "page": "message",
+                "decision": "confirm",
+                "gesture": "Thumb_Up",
+                "purpose": "message_confirmation",
+            },
+        })
+
+        self.assertEqual(result["event"]["modality"], "hand_gesture")
+        self.assertEqual(result["event"]["payload"]["gesture"], "Thumb_Up")
+
 
 if __name__ == "__main__":
     unittest.main()

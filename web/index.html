@@ -18,6 +18,7 @@
           <button class="camera-button" id="start-camera">开启摄像头</button>
           <button class="camera-button" id="calibrate-gaze" disabled>校准视线</button>
           <button class="camera-button" id="clear-gaze-calibration" disabled>清除校准</button>
+          <button class="camera-button" id="toggle-hand-gestures" disabled>开启手势</button>
           <button class="camera-button" id="stop-camera" disabled>关闭</button>
         </div>
         <label class="profile-select">演示用户 <select id="profile"></select></label>
@@ -31,6 +32,7 @@
         <canvas id="face-overlay" aria-label="人脸关键点调试叠加层"></canvas>
       </div>
       <p class="gaze-feedback" id="gaze-feedback">开启摄像头后可进行视线校准。</p>
+      <p class="hand-gesture-status" id="hand-gesture-status">手势识别未开启。</p>
       <p class="camera-privacy">预览不上传、不录像；关闭或离开页面时将停止。</p>
     </aside>
 

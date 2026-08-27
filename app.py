@@ -110,8 +110,8 @@ def record_multimodal_event(event):
     if not isinstance(event, dict):
         raise ValueError("event 必须是对象。")
     modality = str(event.get("modality", "")).strip()
-    if modality not in {"gaze", "screen_context", "speech_text", "head_gesture"}:
-        raise ValueError("modality 仅支持 gaze、screen_context、speech_text 或 head_gesture。")
+    if modality not in {"gaze", "screen_context", "speech_text", "head_gesture", "hand_gesture"}:
+        raise ValueError("modality 仅支持 gaze、screen_context、speech_text、head_gesture 或 hand_gesture。")
     timestamp_ms = event.get("timestamp_ms")
     if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
         raise ValueError("timestamp_ms 必须是正整数毫秒时间戳。")
@@ -129,9 +129,9 @@ def record_multimodal_event(event):
             raise ValueError("dwell_ms 必须是非负整数。")
     if modality == "speech_text" and not str(payload.get("text", "")).strip():
         raise ValueError("speech_text 事件必须包含非空 text。")
-    if modality == "head_gesture":
-        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject"}:
-            raise ValueError("head_gesture 事件必须包含支持的页面和 confirm/reject 决策。")
+    if modality in {"head_gesture", "hand_gesture"}:
+        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject", "toggle_playback"}:
+            raise ValueError("视觉手势事件必须包含支持的页面和决策。")
 
     received_at_ms = current_time_ms()
     stored = {
