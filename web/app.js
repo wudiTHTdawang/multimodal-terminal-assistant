@@ -16,6 +16,8 @@ let gazeTargetSince = 0;
 let gazeTargetLastMatchedAt = 0;
 let gazeTargetLocked = false;
 let gazeCandidateScores = [];
+let gazeCandidateZone;
+let gazeCandidateReliabilityUpdatedAt = 0;
 let calibrationActive = false;
 let calibrationTimer;
 let calibrationSamples = [];
@@ -53,6 +55,9 @@ const CONTACT_GAZE_PROMPT_DWELL_MS = 650;
 // 也避免联系人确认的累计时间反复归零。
 const GAZE_CANDIDATE_HOLD_MS = 420;
 const MUSIC_GAZE_MINIMUM_SCORE = 0.58;
+// 只在持续候选超过一个较长的间隔后才学习一次，避免把每帧检测噪声写入校准记录。
+const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
+const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
@@ -299,6 +304,8 @@ function clearGazeTarget() {
   gazeTargetSince = 0;
   gazeTargetLastMatchedAt = 0;
   gazeCandidateScores = [];
+  gazeCandidateZone = undefined;
+  gazeCandidateReliabilityUpdatedAt = 0;
   musicGazeGestureWindowUntil = 0;
 }
 
@@ -323,6 +330,30 @@ function adjustGazeReliability(outcome) {
     $('#gaze-feedback').textContent = `已记录本次取消，${lastLockedGaze.zone} 区域可靠度微调至 ${stats.reliability.toFixed(2)}。`;
   }
   saveGazeCalibration();
+}
+
+function tuneCandidateReliability(zone, delta, field) {
+  if (!gazeMapper || !zone) return;
+  const stats = gazeMapper.zone_stats[zone];
+  if (!stats) return;
+  stats[field] = (stats[field] || 0) + 1;
+  // 候选停留只是弱反馈，调整幅度远小于“实际发送成功/取消”的明确反馈。
+  stats.reliability = Math.max(0.72, Math.min(1.15, +(stats.reliability + delta).toFixed(3)));
+  saveGazeCalibration();
+}
+
+function rewardStableGazeCandidate(now) {
+  if (!gazeTargetElement || !gazeCandidateZone) return;
+  if (now - gazeCandidateReliabilityUpdatedAt < GAZE_CANDIDATE_REWARD_INTERVAL_MS) return;
+  tuneCandidateReliability(gazeCandidateZone, 0.008, 'stable_candidate');
+  gazeCandidateReliabilityUpdatedAt = now;
+}
+
+function penalizeAbandonedGazeCandidate(now) {
+  if (!gazeTargetElement || !gazeCandidateZone) return;
+  // 仅对已经形成可见黄色候选、随后又离开的情况做一次极小下调。
+  if (now - gazeTargetSince < GAZE_CANDIDATE_ABANDON_MIN_MS) return;
+  tuneCandidateReliability(gazeCandidateZone, -0.006, 'abandoned_candidate');
 }
 
 function eligibleGazeElements() {
@@ -701,6 +732,7 @@ function updateGazeTarget(prediction) {
   if (!bestCandidate || bestCandidate.score < minimumScore) {
     // 单帧落点短暂跑出卡片范围时保留当前黄色框，而不是立刻清除并重新计时。
     if (gazeTargetElement && now - gazeTargetLastMatchedAt <= GAZE_CANDIDATE_HOLD_MS) return;
+    penalizeAbandonedGazeCandidate(now);
     clearGazeTarget();
     $('#gaze-feedback').textContent = '正在估计注视候选，请保持正对屏幕并看向一个卡片。';
     return;
@@ -712,10 +744,13 @@ function updateGazeTarget(prediction) {
   if (gazeTargetElement && gazeTargetElement !== closest
     && now - gazeTargetLastMatchedAt <= GAZE_CANDIDATE_HOLD_MS) return;
   if (gazeTargetElement !== closest) {
+    penalizeAbandonedGazeCandidate(now);
     clearGazeTarget();
     gazeTargetElement = closest;
     gazeTargetSince = now;
     gazeTargetLastMatchedAt = now;
+    gazeCandidateZone = bestCandidate.zone;
+    gazeCandidateReliabilityUpdatedAt = now;
     gazeCandidateScores = [{ time: gazeTargetSince, score: bestCandidate.score }];
     closest.classList.add('gaze-candidate');
     const label = closest.querySelector('strong')?.textContent || closest.querySelector('.schedule-title')?.textContent || '当前项目';
@@ -725,6 +760,7 @@ function updateGazeTarget(prediction) {
   gazeTargetLastMatchedAt = now;
   gazeCandidateScores.push({ time: now, score: bestCandidate.score });
   gazeCandidateScores = gazeCandidateScores.filter((sample) => sample.time >= gazeTargetSince);
+  rewardStableGazeCandidate(now);
   if (closest.classList.contains('contact')
     && now - gazeTargetSince >= CONTACT_GAZE_PROMPT_DWELL_MS
     && !selectedContactId
