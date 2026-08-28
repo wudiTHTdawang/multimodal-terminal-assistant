@@ -1187,7 +1187,8 @@ function canProvideMusicPreference() {
     activeMode
     && currentTrack
     && currentTrack.id !== musicFeedbackLockedTrackId
-    && (musicCardSelected || canAnswerMusicFeedback())
+    // 音乐手势必须以“已确认选中整个播放卡片”为前提，不能仅凭短暂注视触发。
+    && musicCardSelected
   );
 }
 
@@ -1195,7 +1196,7 @@ function canControlSelectedMusicTrack() {
   return Boolean(
     activeMode
     && currentTrack
-    && (musicCardSelected || canAnswerMusicFeedback())
+    && musicCardSelected
   );
 }
 
@@ -1241,7 +1242,7 @@ async function applyHandGesture(gesture, confidence) {
       return true;
     }
   }
-  if (gesture === 'Palm_Toggle' && activeMode && currentTrack) {
+  if (gesture === 'Palm_Toggle' && canControlSelectedMusicTrack()) {
     await recordHandGesture('toggle_playback', 'Palm_Toggle', 'music_playback', 'music', confidence);
     toggleDemoPlayback();
     return true;
