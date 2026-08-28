@@ -80,6 +80,10 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .result { min-height: 18px; max-width: 760px; margin-top: 21px; color: #263754; line-height: 1.7; }
 .result-box { padding: 17px; margin-top: 10px; border: 1px solid #d7e1f5; border-radius: 12px; background: #fff; }
 .result-box ul { margin-bottom: 0; }
+.wechat-handoff { border-color: #a8d8bf; background: linear-gradient(135deg, #f6fffa, #fff); }
+.wechat-handoff strong { color: #1f7a45; }
+.wechat-handoff p { margin: 7px 0; }
+.wechat-handoff small { display: block; margin-top: 10px; color: #61748a; font-size: 12px; line-height: 1.55; }
 .explanation-list { color: #5d6c85; font-size: 13px; }
 .multimodal-inspector { max-width: 760px; margin-top: 18px; padding: 11px 14px; border: 1px solid #dde5f3; border-radius: 10px; color: #52627d; background: #fafcff; font-size: 13px; }
 .multimodal-inspector summary { cursor: pointer; color: #425cac; font-weight: 700; }

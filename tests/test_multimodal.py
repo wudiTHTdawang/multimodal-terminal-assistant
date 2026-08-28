@@ -72,6 +72,23 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         self.assertTrue(result["clear_message_form"])
         self.assertIsNone(state["selected_contact"])
 
+    def test_confirm_speech_prepares_wechat_handoff_without_sending(self):
+        now = int(time.time() * 1000)
+        pending = {"contact": "海涛", "contact_id": "contact_haitao", "content": "晚点开会"}
+        app.MULTIMODAL_EVENT_BUFFER.append(self.event("speech_text", now, {
+            "page": "message",
+            "text": "确认",
+            "source": "simulated",
+        }))
+        state = {"selected_contact": "contact_haitao", "pending_message": pending}
+
+        result = app.understand_multimodal_command(state, now)
+
+        self.assertEqual(result["intent"], "confirm")
+        self.assertEqual(result["wechat_handoff"], pending)
+        self.assertTrue(result["clear_message_form"])
+        self.assertIsNone(state["pending_message"])
+
     def test_hand_gesture_event_is_accepted_without_camera_data(self):
         now = int(time.time() * 1000)
 
