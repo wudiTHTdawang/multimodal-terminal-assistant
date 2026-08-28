@@ -60,6 +60,8 @@ let playbackPaused = false;
 let pausedPlaybackRemainingMs = 0;
 let memoAuthorizationMode = 'merge';
 let authorizedSources = [];
+let activeProfileId;
+let localLatencySamples = [];
 
 const DEMO_TRACK_DURATION_SECONDS = 18;
 const MUSIC_GAZE_GESTURE_WINDOW_MS = 3200;
@@ -89,11 +91,8 @@ const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = '/models/face_landmarker.task';
 const HAND_GESTURE_MODEL_URL = '/models/gesture_recognizer.task';
 const FACE_BUNDLE_URL = '/vendor/mediapipe/vision_bundle.mjs';
-// WASM 体积较大，保留两个等价来源；一个无法访问时会自动尝试另一个。
-const FACE_WASM_URLS = [
-  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
-  `https://unpkg.com/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
-];
+// 视觉运行时、模型和 WASM 全部随项目本地发布；断网时也可完成端侧推理。
+const FACE_WASM_URLS = ['/vendor/mediapipe/wasm'];
 const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v4';
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 const CALIBRATION_POINTS = [
@@ -105,14 +104,29 @@ const CALIBRATION_POINTS = [
 const $ = (selector) => document.querySelector(selector);
 
 async function api(action, extra = {}) {
+  const startedAt = performance.now();
   const response = await fetch('/api/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, ...extra }),
   });
   const payload = await response.json();
+  const elapsedMs = performance.now() - startedAt;
+  if (action !== 'record_multimodal_event' && action !== 'get_recent_multimodal_events') {
+    localLatencySamples.push({ action, elapsedMs });
+    localLatencySamples = localLatencySamples.slice(-100);
+    updateLatencySummary();
+  }
   if (!payload.ok) throw new Error(payload.error);
   return payload.result;
+}
+
+function updateLatencySummary() {
+  const node = $('#latency-summary');
+  if (!node || !localLatencySamples.length) return;
+  const values = localLatencySamples.map((item) => item.elapsedMs).sort((left, right) => left - right);
+  const percentile = (ratio) => values[Math.min(values.length - 1, Math.ceil(values.length * ratio) - 1)];
+  node.textContent = `本页面本轮本地接口延迟：${values.length} 次，P50 ${percentile(0.50).toFixed(0)} ms，P95 ${percentile(0.95).toFixed(0)} ms。该指标不含摄像头采样等待和人工输入时间。`;
 }
 
 function toast(message) {
@@ -585,6 +599,10 @@ function renderMessageUnderstanding(result) {
   }
 }
 
+function fusionSummary(result) {
+  return result?.fusion?.summary ? `多模态综合判断：${result.fusion.summary}` : '';
+}
+
 async function submitSimulatedSpeech() {
   const text = $('#message-content').value.trim();
   if (!text) {
@@ -656,6 +674,7 @@ async function submitSimulatedMusicCommand() {
     });
     const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
     $('#music-command').value = '';
+    if (fusionSummary(result)) $('#gaze-feedback').textContent = fusionSummary(result);
     if (result.intent === 'cancel_music_selection') {
       clearMusicTrackSelection(result.message);
       toast(result.message);
@@ -1093,7 +1112,7 @@ async function initializeFaceLandmarker() {
       lastError = error;
     }
   }
-  throw new Error(`视觉运行时无法加载，请检查网络是否可访问 jsDelivr 或 unpkg。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
+  throw new Error(`本地视觉运行时无法加载，请检查 web/vendor/mediapipe/wasm 是否完整。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
 }
 
 function setHandGestureStatus(message) {
@@ -1504,9 +1523,11 @@ function stopCamera(showMessage = true) {
 }
 
 function renderContacts() {
+  const profile = data.profiles.find((item) => item.id === activeProfileId);
+  const frequentContacts = new Set(profile?.frequent_contacts || []);
   $('#contacts').innerHTML = data.contacts.map((contact) => `
     <button class="card contact" data-id="${contact.id}">
-      <strong>${contact.name}</strong><small>${contact.relationship}${contact.frequent ? ' · 常用联系人' : ''}</small>
+      <strong>${contact.name}</strong><small>${contact.relationship}${frequentContacts.has(contact.id) ? ' · 常用联系人' : ''}</small>
     </button>`).join('');
   document.querySelectorAll('.contact').forEach((node) => node.addEventListener('click', async () => {
     clearGazeSuggestion();
@@ -1809,7 +1830,8 @@ function showSchedule(result) {
         <small>${item.content || '无补充说明'}</small>
       </label>
     </article>`).join('');
-  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${items}</div>`;
+  const fusionNote = fusionSummary(result);
+  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${items}</div>`;
   document.querySelectorAll('[data-event-key]').forEach((checkbox) => {
     checkbox.addEventListener('change', async () => {
       try {
@@ -1925,6 +1947,30 @@ function bindEvents() {
   }));
 
   $('#prepare-message').onclick = submitSimulatedSpeech;
+  $('#profile').onchange = async (event) => {
+    try {
+      const result = await api('select_profile', { profile_id: event.target.value });
+      activeProfileId = event.target.value;
+      data.state = result.state;
+      activeMode = result.state.active_mode;
+      selectedContactId = undefined;
+      selectedContactSource = undefined;
+      pendingMessage = undefined;
+      currentTrack = undefined;
+      currentPreferencePlaylist = [];
+      $('#message-content').value = '';
+      $('#message-result').innerHTML = '';
+      $('#music-result').innerHTML = '';
+      $('#memo-result').innerHTML = '';
+      renderContacts();
+      renderModes();
+      renderAuthorizedSources(result.state.authorized_sources || [], result.message);
+      toast(result.message);
+    } catch (error) {
+      event.target.value = activeProfileId;
+      toast(error.message);
+    }
+  };
   $('#refresh-multimodal-events').onclick = refreshMultimodalInspector;
   $('#multimodal-inspector').addEventListener('toggle', (event) => {
     if (event.currentTarget.open) void refreshMultimodalInspector();
@@ -1975,6 +2021,8 @@ async function init() {
   data = await (await fetch('/api/bootstrap')).json();
   gazeMapper = loadGazeCalibration();
   $('#profile').innerHTML = data.profiles.map((profile) => `<option value="${profile.id}">${profile.display_name}</option>`).join('');
+  activeProfileId = data.state.active_profile_id;
+  $('#profile').value = activeProfileId;
   if (data.state.authorized_sources?.length) {
     renderAuthorizedSources(data.state.authorized_sources, '已从本机保存的授权记录恢复。文件若已改动，请选择更新后的同名文件并同步。');
   }

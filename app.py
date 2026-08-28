@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import copy
 import hashlib
 import re
 import time
@@ -22,6 +23,12 @@ STATE_FILE = DATA_DIR / "runtime_state.json"
 AUTHORIZED_DIR = DATA_DIR / "authorized_memos"
 EVENT_TTL_MS = 10_000
 EVENT_BUFFER_LIMIT = 100
+DEFAULT_PROFILE_ID = "user_xiaoyu"
+PROFILE_STATE_FIELDS = (
+    "focus_mode", "active_mode", "selected_contact", "authorized_sources", "reminders",
+    "completed_events", "preference_adjustments", "track_preferences",
+    "mode_preference_playlists", "recommendation_turns", "pending_message",
+)
 MULTIMODAL_EVENT_BUFFER = []
 MULTIMODAL_EVENT_LOCK = Lock()
 
@@ -55,13 +62,74 @@ def default_state():
         "mode_preference_playlists": {},
         "recommendation_turns": {},
         "pending_message": None,
+        "active_profile_id": DEFAULT_PROFILE_ID,
+        "profile_states": {},
     }
+
+
+def profile_runtime_defaults(profile_id=None):
+    state = {
+        "focus_mode": False, "active_mode": None, "selected_contact": None,
+        "authorized_sources": [], "reminders": [], "completed_events": [],
+        "preference_adjustments": {}, "track_preferences": {},
+        "mode_preference_playlists": {}, "recommendation_turns": {}, "pending_message": None,
+    }
+    if not profile_id:
+        return state
+    profile = next((item for item in read_json(DATA_DIR / "profiles_demo.json") if item["id"] == profile_id), None)
+    if not profile:
+        return state
+    tracks = read_json(DATA_DIR / "music_library.json")
+    for mode, genre_scores in profile.get("music_preferences", {}).items():
+        scores = {
+            track["id"]: genre_scores.get(track.get("genre"), 0)
+            for track in tracks if mode in track.get("moods", []) and genre_scores.get(track.get("genre"), 0) != 0
+        }
+        if scores:
+            state["track_preferences"][mode] = scores
+            state["mode_preference_playlists"][mode] = [track_id for track_id, score in scores.items() if score > 0]
+    return state
+
+
+def profile_snapshot(state):
+    defaults = profile_runtime_defaults()
+    return {field: copy.deepcopy(state.get(field, defaults[field])) for field in PROFILE_STATE_FIELDS}
+
+
+def apply_profile_snapshot(state, snapshot):
+    defaults = profile_runtime_defaults()
+    for field in PROFILE_STATE_FIELDS:
+        state[field] = copy.deepcopy(snapshot.get(field, defaults[field]))
+
+
+def synchronize_active_profile(state):
+    profile_id = state.get("active_profile_id", DEFAULT_PROFILE_ID)
+    state.setdefault("profile_states", {})[profile_id] = profile_snapshot(state)
+
+
+def switch_active_profile(state, profile_id):
+    available = {profile["id"] for profile in read_json(DATA_DIR / "profiles_demo.json")}
+    if profile_id not in available:
+        raise ValueError("未找到该演示用户。")
+    synchronize_active_profile(state)
+    profiles = state.setdefault("profile_states", {})
+    profiles.setdefault(profile_id, profile_runtime_defaults(profile_id))
+    state["active_profile_id"] = profile_id
+    apply_profile_snapshot(state, profiles[profile_id])
+    clear_active_music_mode(state)
 
 
 def load_state():
     state = default_state()
     if STATE_FILE.exists():
         state.update(read_json(STATE_FILE))
+
+    if not state.get("profile_states"):
+        initial_profile = profile_snapshot(state) if STATE_FILE.exists() else profile_runtime_defaults(DEFAULT_PROFILE_ID)
+        state["profile_states"] = {DEFAULT_PROFILE_ID: initial_profile}
+    state["active_profile_id"] = state.get("active_profile_id") or DEFAULT_PROFILE_ID
+    state["profile_states"].setdefault(state["active_profile_id"], profile_runtime_defaults(state["active_profile_id"]))
+    apply_profile_snapshot(state, state["profile_states"][state["active_profile_id"]])
 
     # 兼容早期版本把授权来源保存为字符串的状态文件，避免升级后请求中断。
     state["authorized_sources"] = [
@@ -81,6 +149,7 @@ def load_state():
 
 
 def save_state(state):
+    synchronize_active_profile(state)
     STATE_FILE.write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -194,7 +263,52 @@ def visible_target_ids(events, page, timestamp_ms):
     }
 
 
-def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
+def summarize_multimodal_alignment(events, page, anchor_timestamp_ms, speech_intent=None):
+    """只保留结构化判断依据，不保存原始画面、音频或人脸关键点。"""
+    contexts = [
+        item for item in events
+        if item["modality"] == "screen_context"
+        and item["payload"].get("page") == page
+        and abs(item["timestamp_ms"] - anchor_timestamp_ms) <= 5_000
+    ]
+    gazes = [
+        item for item in events
+        if item["modality"] == "gaze"
+        and item["payload"].get("page") == page
+        and anchor_timestamp_ms - 4_000 <= item["timestamp_ms"] <= anchor_timestamp_ms + 1_000
+    ]
+    decisions = [
+        item for item in events
+        if item["modality"] in {"head_gesture", "hand_gesture"}
+        and item["payload"].get("page") == page
+        and anchor_timestamp_ms - 2_000 <= item["timestamp_ms"] <= anchor_timestamp_ms + 1_000
+    ]
+    best_gaze = max(gazes, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
+    decision_values = [item["payload"].get("decision") for item in decisions]
+    conflict = speech_intent == "cancel" and "confirm" in decision_values
+    summary = {
+        "page": page,
+        "anchor_timestamp_ms": anchor_timestamp_ms,
+        "windows_ms": {"screen_context": 5_000, "gaze_before": 4_000, "decision_before": 2_000},
+        "modalities": ["speech_text"] + (["screen_context"] if contexts else []) + (["gaze"] if best_gaze else []) + sorted({item["modality"] for item in decisions}),
+        "screen_context_available": bool(contexts),
+        "gaze_target_id": best_gaze["payload"].get("target_id") if best_gaze else None,
+        "gaze_confidence": best_gaze["confidence"] if best_gaze else None,
+        "decision_values": decision_values,
+        "conflict": "explicit_cancel_overrides_visual_confirm" if conflict else None,
+    }
+    if conflict:
+        summary["summary"] = "检测到语音取消与视觉确认冲突，已按安全规则优先执行明确取消。"
+    elif best_gaze and contexts:
+        summary["summary"] = "已将文本指令、稳定注视和当前页面上下文按时间窗口关联。"
+    elif contexts:
+        summary["summary"] = "已将文本指令与当前页面上下文按时间窗口关联。"
+    else:
+        summary["summary"] = "本轮以文本指令为主；未找到同窗口页面上下文。"
+    return summary
+
+
+def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id=None):
     events = recent_multimodal_events()
     speech_events = [
         item for item in events
@@ -299,6 +413,24 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
             "当前屏幕上下文为联系人页面，因此将“他”解析为该联系人。",
         ],
     }
+
+
+def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
+    """所有文本指令共用同一套时间对齐摘要，再进入对应场景的意图处理。"""
+    events = recent_multimodal_events()
+    speech_events = [
+        item for item in events
+        if item["modality"] == "speech_text" and abs(item["timestamp_ms"] - speech_timestamp_ms) <= 1_000
+    ]
+    if not speech_events:
+        raise ValueError("未找到对应的模拟语音事件，请重新提交。")
+    speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
+    intent, _ = parse_simulated_speech(str(speech["payload"].get("text", "")))
+    result = understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id)
+    fusion = summarize_multimodal_alignment(events, speech["payload"].get("page", "unknown"), speech_timestamp_ms, intent)
+    result["fusion"] = fusion
+    result.setdefault("explanation", []).append(f"多模态综合判断：{fusion['summary']}")
+    return result
 
 
 DEMO_COMMON_TRACKS = {
@@ -527,6 +659,16 @@ class AssistantHandler(SimpleHTTPRequestHandler):
 
         if action == "record_multimodal_event":
             return record_multimodal_event(payload.get("event"))
+
+        if action == "select_profile":
+            switch_active_profile(state, str(payload.get("profile_id", "")))
+            save_state(state)
+            profile = next(item for item in read_json(DATA_DIR / "profiles_demo.json") if item["id"] == state["active_profile_id"])
+            return {
+                "message": f"已切换到{profile['display_name']}的本地画像；偏好、日程授权和交互状态彼此独立。",
+                "profile": profile,
+                "state": state,
+            }
 
         if action == "get_recent_multimodal_events":
             events = recent_multimodal_events()

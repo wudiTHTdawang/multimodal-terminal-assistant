@@ -57,6 +57,8 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         self.assertEqual(result["intent"], "send_message")
         self.assertEqual(result["pending"]["contact_id"], "contact_zhangsan")
         self.assertEqual(result["pending"]["content"], "晚点开会")
+        self.assertEqual(result["fusion"]["gaze_target_id"], "contact_zhangsan")
+        self.assertTrue(result["fusion"]["screen_context_available"])
 
     def test_cancel_speech_clears_current_contact_selection(self):
         now = int(time.time() * 1000)
@@ -89,6 +91,7 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         self.assertTrue(result["clear_message_form"])
         self.assertIsNone(state["pending_message"])
         self.assertIsNone(state["selected_contact"])
+        self.assertIn("speech_text", result["fusion"]["modalities"])
 
     def test_hand_gesture_event_is_accepted_without_camera_data(self):
         now = int(time.time() * 1000)
@@ -136,6 +139,16 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         result = app.understand_multimodal_command({"selected_contact": None, "pending_message": None}, now)
 
         self.assertEqual(result["intent"], "cancel_music_selection")
+
+    def test_profiles_keep_runtime_preferences_separate(self):
+        state = app.default_state()
+        state["track_preferences"] = {"focus": {"track_010": 3}}
+        app.switch_active_profile(state, "user_chenmo")
+        self.assertEqual(state["active_profile_id"], "user_chenmo")
+        self.assertIn("track_004", state["track_preferences"]["focus"])
+        state["track_preferences"] = {"focus": {"track_015": 2}}
+        app.switch_active_profile(state, "user_xiaoyu")
+        self.assertEqual(state["track_preferences"], {"focus": {"track_010": 3}})
 
 
 if __name__ == "__main__":
