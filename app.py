@@ -5,10 +5,7 @@ from __future__ import annotations
 import json
 import argparse
 import hashlib
-import ctypes
-import os
 import re
-import subprocess
 import time
 from threading import Lock
 from datetime import datetime, timedelta
@@ -96,91 +93,6 @@ def clear_active_music_mode(state):
 
 def current_time_ms():
     return int(time.time() * 1000)
-
-
-def find_wechat_executable():
-    """仅查找本机常见的微信桌面端路径，不联网、不读取微信聊天数据。"""
-    program_files = os.environ.get("ProgramFiles", r"C:\\Program Files")
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\\Program Files (x86)")
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    candidates = [
-        Path(program_files) / "Tencent" / "WeChat" / "WeChat.exe",
-        Path(program_files_x86) / "Tencent" / "WeChat" / "WeChat.exe",
-        Path(local_app_data) / "Tencent" / "WeChat" / "WeChat.exe",
-    ]
-    return next((path for path in candidates if path.is_file()), None)
-
-
-def copy_text_to_windows_clipboard(text):
-    """将正文复制到 Windows 剪贴板；调用方必须已获得用户点击确认。"""
-    if os.name != "nt":
-        raise ValueError("微信桌面端交接目前仅支持 Windows。")
-    if not text:
-        raise ValueError("没有可复制的消息正文。")
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
-    user32.OpenClipboard.restype = ctypes.c_bool
-    user32.CloseClipboard.restype = ctypes.c_bool
-    user32.EmptyClipboard.restype = ctypes.c_bool
-    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-    user32.SetClipboardData.restype = ctypes.c_void_p
-    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-    kernel32.GlobalAlloc.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalUnlock.restype = ctypes.c_bool
-    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalFree.restype = ctypes.c_void_p
-
-    opened = False
-    for _ in range(6):
-        if user32.OpenClipboard(None):
-            opened = True
-            break
-        time.sleep(0.05)
-    if not opened:
-        raise OSError("无法访问剪贴板，请关闭正在占用剪贴板的程序后重试。")
-    memory = None
-    try:
-        if not user32.EmptyClipboard():
-            raise OSError("无法清空剪贴板。")
-        buffer = ctypes.create_unicode_buffer(text)
-        size = ctypes.sizeof(buffer)
-        memory = kernel32.GlobalAlloc(0x0002, size)  # GMEM_MOVEABLE
-        if not memory:
-            raise MemoryError("无法为剪贴板分配内存。")
-        locked = kernel32.GlobalLock(memory)
-        if not locked:
-            raise OSError("无法写入剪贴板。")
-        ctypes.memmove(locked, ctypes.addressof(buffer), size)
-        kernel32.GlobalUnlock(memory)
-        if not user32.SetClipboardData(13, memory):  # CF_UNICODETEXT
-            raise OSError("无法设置剪贴板文本。")
-        memory = None  # 所有权已移交给系统剪贴板。
-    finally:
-        if memory:
-            kernel32.GlobalFree(memory)
-        user32.CloseClipboard()
-
-
-def open_wechat_handoff(contact, content):
-    if not isinstance(contact, str) or not contact.strip() or len(contact) > 80:
-        raise ValueError("微信交接缺少有效联系人名称。")
-    if not isinstance(content, str) or not content.strip() or len(content) > 1000:
-        raise ValueError("微信交接缺少有效消息正文。")
-    executable = find_wechat_executable()
-    if not executable:
-        raise ValueError("未在常见位置找到微信桌面端，请安装或启动微信后重试。")
-    copy_text_to_windows_clipboard(content.strip())
-    subprocess.Popen([str(executable)], close_fds=True)
-    return {
-        "message": f"已打开微信，并已复制给{contact.strip()}的消息正文。请在微信中选择联系人、粘贴后自行点击发送。",
-        "contact": contact.strip(),
-        "copied": True,
-        "launched": True,
-    }
 
 
 def recent_multimodal_events():
@@ -308,9 +220,19 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
             save_state(state)
             return {"message": "已取消当前联系人选择，可以重新选择联系人。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到取消指令：{speech['payload']['text']}", "已清除当前联系人选择。"]}
         if intent == "confirm":
-            # 保留待发送消息及联系人锁定，直至用户完成实际发送后明确结束本轮。
+            state["pending_message"] = None
+            state["selected_contact"] = None
             save_state(state)
-            return {"message": "消息已确认，联系人将保持锁定直到完成实际发送。", "intent": intent, "wechat_handoff": pending, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
+            return {
+                "message": f"已通过本地模拟消息应用向{pending['contact']}发送：‘{pending['content']}’。",
+                "intent": intent,
+                "simulated_send": pending,
+                "clear_message_form": True,
+                "explanation": [
+                    f"识别到确认词：{speech['payload']['text']}",
+                    "已完成本地模拟发送，未调用或读取任何第三方应用。",
+                ],
+            }
         state["pending_message"] = None
         state["selected_contact"] = None
         save_state(state)
@@ -642,24 +564,13 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             pending = state.get("pending_message")
             if not pending:
                 raise ValueError("当前没有待确认的消息。")
-            save_state(state)
-            return {"message": "消息已确认，联系人将保持锁定直到完成实际发送。", "wechat_handoff": pending}
-
-        if action == "open_wechat_handoff":
-            pending = state.get("pending_message")
-            if not pending:
-                raise ValueError("当前没有待发送消息，请重新发起消息操作。")
-            if payload.get("contact") != pending.get("contact") or payload.get("content") != pending.get("content"):
-                raise ValueError("微信交接内容与当前确认消息不一致，已拒绝执行。")
-            return open_wechat_handoff(pending["contact"], pending["content"])
-
-        if action == "complete_message_send":
-            if not state.get("pending_message"):
-                raise ValueError("当前没有待完成的消息。")
-            state["selected_contact"] = None
             state["pending_message"] = None
+            state["selected_contact"] = None
             save_state(state)
-            return {"message": "已结束本次发送，现可重新选择联系人。"}
+            return {
+                "message": f"已通过本地模拟消息应用向{pending['contact']}发送：‘{pending['content']}’。",
+                "simulated_send": pending,
+            }
 
         if action == "cancel_message":
             state["selected_contact"] = None

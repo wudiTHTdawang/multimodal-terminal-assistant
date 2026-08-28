@@ -564,11 +564,7 @@ async function finishMessageDecision(action, outcome, source = 'button') {
     if (source === 'hand') await recordHandGesture(outcome === 'success' ? 'confirm' : 'reject', outcome === 'success' ? 'Thumb_Up' : 'Thumb_Down', 'message_confirmation');
     const result = await api(action, pendingMessage);
     adjustGazeReliability(outcome);
-    if (result.wechat_handoff) {
-      renderWeChatHandoff(result.wechat_handoff, result.message);
-    } else {
-      resetMessageForm(result.message);
-    }
+    resetMessageForm(result.message);
   } catch (error) {
     toast(error.message);
   } finally {
@@ -580,34 +576,13 @@ function renderMessageUnderstanding(result) {
   const explanation = result.explanation?.length
     ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
   const actions = result.pending
-    ? '<p><button class="primary" id="confirm-send">确认并准备微信</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">确认后仍需点击“打开微信并复制正文”；系统不会自动发送。也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
+    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">确认后将仅在本地模拟消息应用中展示发送成功；也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
   $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
   if (result.pending) {
     pendingMessage = result.pending;
     $('#confirm-send').onclick = () => finishMessageDecision('confirm_send', 'success');
     $('#cancel-send').onclick = () => finishMessageDecision('cancel_message', 'cancel');
   }
-}
-
-function renderWeChatHandoff(handoff, statusMessage = '消息已确认，联系人将保持锁定直到完成实际发送。') {
-  const contact = escapeHtml(handoff.contact || '该联系人');
-  const content = escapeHtml(handoff.content || '');
-  $('#message-result').innerHTML = `<div class="result-box wechat-handoff"><strong>消息已确认，等待转交微信</strong><p>${escapeHtml(statusMessage)}</p><p>收件人：${contact}</p><p>正文：${content}</p><button class="primary" id="open-wechat-handoff">打开微信并复制正文</button><button class="secondary" id="complete-message-send">我已完成实际发送</button><button class="secondary" id="cancel-wechat-handoff">取消本次发送</button><small>联系人会一直锁定。点击“打开微信并复制正文”后，请在微信中选择 ${contact}、粘贴并自行点击发送；发送完成后再点击“我已完成实际发送”。</small></div>`;
-  $('#open-wechat-handoff').onclick = async () => {
-    try {
-      const result = await api('open_wechat_handoff', handoff);
-      renderWeChatHandoff(handoff, result.message);
-      toast('微信已打开，消息正文已复制。');
-    } catch (error) { toast(error.message); }
-  };
-  $('#complete-message-send').onclick = async () => {
-    try { resetMessageForm((await api('complete_message_send')).message); }
-    catch (error) { toast(error.message); }
-  };
-  $('#cancel-wechat-handoff').onclick = async () => {
-    try { resetMessageForm((await api('cancel_message')).message); }
-    catch (error) { toast(error.message); }
-  };
 }
 
 async function submitSimulatedSpeech() {
@@ -651,11 +626,6 @@ async function submitSimulatedSpeech() {
       speech_timestamp_ms: timestamp,
       preferred_contact_id: selectedContactSource === 'manual' ? selectedContactId : undefined,
     });
-    if (result.wechat_handoff) {
-      adjustGazeReliability('success');
-      renderWeChatHandoff(result.wechat_handoff, result.message);
-      return;
-    }
     if (result.clear_message_form) {
       if (result.intent === 'confirm') adjustGazeReliability('success');
       if (result.intent === 'cancel') adjustGazeReliability('cancel');
