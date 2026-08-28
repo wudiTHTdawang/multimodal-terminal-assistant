@@ -1956,6 +1956,168 @@ function bindEvents() {
     try { showSchedule(await api('query_schedule')); }
     catch (error) { toast(error.message); }
   };
+
+  // ----- 消息页面麦克风 -----
+  const voiceMessageBtn = document.getElementById('voice-message-btn');
+  if (voiceMessageBtn) {
+    voiceMessageBtn.addEventListener('click', () => {
+      const input = document.getElementById('message-content');
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        toast('当前浏览器不支持语音识别，请使用 Chrome 或 Edge。');
+        return;
+      }
+      if (input.dataset.listening === 'true') {
+        toast('正在录音，请稍候…');
+        return;
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'zh-CN';
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      const micBtn = voiceMessageBtn;
+      input.dataset.listening = 'true';
+      micBtn.classList.add('listening');
+      const originalPlaceholder = input.placeholder;
+      input.placeholder = '🎤 正在倾听…';
+      toast('🎤 请说话…');
+
+      recognition.onresult = (event) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+        if (interimTranscript) {
+          input.value = interimTranscript;
+        }
+        if (finalTranscript) {
+          input.value = finalTranscript.trim();
+          const submitBtn = document.getElementById('prepare-message');
+          if (submitBtn) {
+            setTimeout(() => submitBtn.click(), 200);
+          }
+          recognition.stop();
+        }
+      };
+
+      recognition.onend = () => {
+        input.dataset.listening = 'false';
+        micBtn.classList.remove('listening');
+        input.placeholder = originalPlaceholder;
+        if (!input.value.trim()) {
+          toast('未识别到有效语音，请重试。');
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.warn('语音识别错误：', event.error);
+        let msg = '语音识别失败';
+        if (event.error === 'not-allowed') msg = '请允许浏览器使用麦克风权限。';
+        else if (event.error === 'no-speech') msg = '未检测到语音，请对着麦克风说话。';
+        else if (event.error === 'audio-capture') msg = '无法访问麦克风，请检查设备连接。';
+        toast(msg);
+        recognition.stop();
+      };
+
+      try {
+        recognition.start();
+      } catch (error) {
+        input.dataset.listening = 'false';
+        micBtn.classList.remove('listening');
+        toast('语音识别启动失败，请刷新页面重试。');
+      }
+    });
+  }
+
+  // ----- 音乐页面麦克风 -----
+  const voiceMusicBtn = document.getElementById('voice-music-btn');
+  if (voiceMusicBtn) {
+    voiceMusicBtn.addEventListener('click', () => {
+      const input = document.getElementById('music-command');
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        toast('当前浏览器不支持语音识别，请使用 Chrome 或 Edge。');
+        return;
+      }
+      if (input.dataset.listening === 'true') {
+        toast('正在录音，请稍候…');
+        return;
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'zh-CN';
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      const micBtn = voiceMusicBtn;
+      input.dataset.listening = 'true';
+      micBtn.classList.add('listening');
+      const originalPlaceholder = input.placeholder;
+      input.placeholder = '🎤 正在倾听…';
+      toast('🎤 请说话…');
+
+      recognition.onresult = (event) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+        if (interimTranscript) {
+          input.value = interimTranscript;
+        }
+        if (finalTranscript) {
+          input.value = finalTranscript.trim();
+          const submitBtn = document.getElementById('prepare-music-command');
+          if (submitBtn) {
+            setTimeout(() => submitBtn.click(), 200);
+          }
+          recognition.stop();
+        }
+      };
+
+      recognition.onend = () => {
+        input.dataset.listening = 'false';
+        micBtn.classList.remove('listening');
+        input.placeholder = originalPlaceholder;
+        if (!input.value.trim()) {
+          toast('未识别到有效语音，请重试。');
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.warn('语音识别错误：', event.error);
+        let msg = '语音识别失败';
+        if (event.error === 'not-allowed') msg = '请允许浏览器使用麦克风权限。';
+        else if (event.error === 'no-speech') msg = '未检测到语音，请对着麦克风说话。';
+        else if (event.error === 'audio-capture') msg = '无法访问麦克风，请检查设备连接。';
+        toast(msg);
+        recognition.stop();
+      };
+
+      try {
+        recognition.start();
+      } catch (error) {
+        input.dataset.listening = 'false';
+        micBtn.classList.remove('listening');
+        toast('语音识别启动失败，请刷新页面重试。');
+      }
+    });
+  }
 }
 
 function resetMessageForm(message) {
