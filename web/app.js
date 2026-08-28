@@ -11,9 +11,9 @@ let handGestureRecognizer;
 let handGesturesEnabled = false;
 let lastHandDetectionAt = 0;
 let handGestureCandidate;
-let handGestureLatched;
 let lastHandGestureAt = 0;
 let handMotionHistory = [];
+let handOpenSeenUntil = 0;
 let handGestureSuppressHeadUntil = 0;
 let palmPoseCandidate;
 let stablePalmPose;
@@ -77,12 +77,12 @@ const HAND_GESTURE_INTERVAL_MS = 120;
 const HAND_GESTURE_DWELL_MS = 360;
 const HAND_WAVE_DWELL_MS = 180;
 const HAND_GESTURE_CANDIDATE_GAP_MS = 360;
-const HAND_WAVE_WINDOW_MS = 680;
-const HAND_WAVE_MIN_HORIZONTAL_SPAN = 0.20;
-const HAND_WAVE_MAX_VERTICAL_SPAN = 0.18;
+const HAND_WAVE_WINDOW_MS = 900;
+const HAND_WAVE_MIN_HORIZONTAL_SPAN = 0.10;
+const HAND_WAVE_MAX_VERTICAL_SPAN = 0.28;
 const PALM_POSE_DWELL_MS = 180;
 const PALM_TOGGLE_TRANSITION_WINDOW_MS = 1100;
-const HAND_GESTURE_COOLDOWN_MS = 650;
+const HAND_GESTURE_COOLDOWN_MS = 900;
 const HAND_GESTURE_HEAD_SUPPRESS_MS = 900;
 const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
 
@@ -1139,7 +1139,7 @@ async function enableHandGestures() {
     handGesturesEnabled = true;
     lastHandDetectionAt = 0;
     handGestureCandidate = undefined;
-    handGestureLatched = undefined;
+    handOpenSeenUntil = 0;
     handGestureSuppressHeadUntil = 0;
     palmPoseCandidate = undefined;
     stablePalmPose = undefined;
@@ -1254,8 +1254,8 @@ function isLikelyOpenPalm(landmarks) {
   return extendedCount >= 3 && palmWidth > 0.02 && fingertipSpread > palmWidth * 1.05;
 }
 
-function detectPalmWave(landmarks, now, openPalm) {
-  if (!openPalm || !landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) {
+function detectPalmWave(landmarks, now, waveEligible) {
+  if (!waveEligible || !landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) {
     handMotionHistory = [];
     return false;
   }
@@ -1300,15 +1300,17 @@ function observeHandGesture(result, now) {
   let gesture = category?.categoryName;
   const confidence = category?.score || 0;
   const openPalm = gesture === 'Open_Palm' || isLikelyOpenPalm(landmarks);
+  if (openPalm) handOpenSeenUntil = now + 950;
   const palmState = openPalm ? 'open' : gesture === 'Closed_Fist' && confidence >= 0.65 ? 'closed' : undefined;
   const palmToggle = updatePalmToggleState(palmState, now);
-  if (detectPalmWave(landmarks, now, openPalm)) {
+  // 挥动时分类器偶尔会短暂丢失“张开手掌”，仍在最近识别到张开的短窗口内追踪其轨迹。
+  const waveEligible = Boolean(landmarks && now <= handOpenSeenUntil);
+  if (detectPalmWave(landmarks, now, waveEligible)) {
     gesture = 'Palm_Wave';
   } else if (palmToggle) {
     handGestureCandidate = undefined;
     handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
-    if (handGestureLatched || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
-    handGestureLatched = 'Palm_Toggle';
+    if (now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
     lastHandGestureAt = now;
     void applyHandGesture('Palm_Toggle', 0.8).then((handled) => {
       setHandGestureStatus(handled
@@ -1319,26 +1321,18 @@ function observeHandGesture(result, now) {
   } else if (palmState) {
     handGestureCandidate = undefined;
     handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
-    if (!handGestureLatched) {
-      setHandGestureStatus(palmState === 'open'
-        ? '已识别张开手掌：原位握拳可暂停 / 继续；横向挥动可切下一首。'
-        : '已识别握拳：原位张开手掌可暂停 / 继续。');
-    }
+    setHandGestureStatus(palmState === 'open'
+      ? '已识别张开手掌：原位握拳可暂停 / 继续；横向挥动可切下一首。'
+      : '已识别握拳：原位张开手掌可暂停 / 继续。');
     return;
   }
   const minimumConfidence = ['Palm_Toggle', 'Palm_Wave'].includes(gesture) ? 0 : 0.72;
   if (!['Thumb_Up', 'Thumb_Down', 'Palm_Toggle', 'Palm_Wave'].includes(gesture) || confidence < minimumConfidence) {
     if (handGestureCandidate && now - handGestureCandidate.lastSeen <= HAND_GESTURE_CANDIDATE_GAP_MS) return;
     handGestureCandidate = undefined;
-    handGestureLatched = undefined;
     return;
   }
   handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
-  // 每次动作只触发一次；用户放下手或改成非识别姿势后，才允许下一次操作。
-  if (handGestureLatched) {
-    handGestureCandidate = undefined;
-    return;
-  }
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
     handGestureCandidate = { gesture, confidence, since: now, lastSeen: now };
     const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Toggle' ? '手掌开合' : '横向挥手';
@@ -1351,7 +1345,6 @@ function observeHandGesture(result, now) {
   if (now - handGestureCandidate.since < dwellMs || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
   const stableGesture = handGestureCandidate;
   handGestureCandidate = undefined;
-  handGestureLatched = stableGesture.gesture;
   lastHandGestureAt = now;
   void applyHandGesture(stableGesture.gesture, stableGesture.confidence).then((handled) => {
     setHandGestureStatus(handled
@@ -1476,8 +1469,8 @@ function stopCamera(showMessage = true) {
   lastFacePresence = undefined;
   handGesturesEnabled = false;
   handGestureCandidate = undefined;
-  handGestureLatched = undefined;
   handMotionHistory = [];
+  handOpenSeenUntil = 0;
   handGestureSuppressHeadUntil = 0;
   palmPoseCandidate = undefined;
   stablePalmPose = undefined;
