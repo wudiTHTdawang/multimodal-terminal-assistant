@@ -454,8 +454,11 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
             result["explanation"].append(f"本地大模型冲突解释：{llm_result['conflict_explanation']}")
         if llm_result.get("personalization_reason"):
             result["explanation"].append(f"本地大模型个性化依据：{llm_result['personalization_reason']}")
-        # 只在不涉及待确认的高风险操作时替换为自然语言答复。
-        if llm_result.get("response") and not result.get("pending") and not result.get("simulated_send"):
+        # 操作性反馈（发送、取消、切歌）必须保持规则文案；只让模型润色查询类答复。
+        # 这样模型即使措辞失误，也不会让用户误解实际执行状态。
+        if llm_result.get("response") and result.get("intent") in {
+            "query_schedule_today", "query_schedule_tomorrow", "query_schedule_all", "unknown",
+        }:
             result["message"] = llm_result["response"]
     else:
         result["explanation"].append("本地大模型本轮未在时限内返回，已使用安全规则模板。")

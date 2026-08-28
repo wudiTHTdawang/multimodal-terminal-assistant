@@ -14,6 +14,7 @@ class MultimodalUnderstandingTests(unittest.TestCase):
     def setUp(self):
         self.original_save_state = app.save_state
         self.original_llm_enabled = app.LOCAL_LLM_ENABLED
+        self.original_enhance = app.enhance_local_response
         app.save_state = lambda _state: None
         app.LOCAL_LLM_ENABLED = False
         app.MULTIMODAL_EVENT_BUFFER.clear()
@@ -21,6 +22,7 @@ class MultimodalUnderstandingTests(unittest.TestCase):
     def tearDown(self):
         app.save_state = self.original_save_state
         app.LOCAL_LLM_ENABLED = self.original_llm_enabled
+        app.enhance_local_response = self.original_enhance
         app.MULTIMODAL_EVENT_BUFFER.clear()
 
     @staticmethod
@@ -152,6 +154,46 @@ class MultimodalUnderstandingTests(unittest.TestCase):
         state["track_preferences"] = {"focus": {"track_015": 2}}
         app.switch_active_profile(state, "user_xiaoyu")
         self.assertEqual(state["track_preferences"], {"focus": {"track_010": 3}})
+
+    def test_llm_can_explain_but_cannot_replace_pending_message(self):
+        app.LOCAL_LLM_ENABLED = True
+        app.enhance_local_response = lambda **_kwargs: {
+            "response": "模型不应改写待确认发送",
+            "conflict_explanation": "",
+            "personalization_reason": "偏好简洁答复",
+        }
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.extend([
+            self.event("screen_context", now - 300, {
+                "page": "message", "visible_targets": [{"target_id": "contact_zhangsan"}],
+            }),
+            self.event("gaze", now - 200, {
+                "page": "message", "target_type": "contact", "target_id": "contact_zhangsan", "dwell_ms": 1200,
+            }, confidence=0.9),
+            self.event("speech_text", now, {
+                "page": "message", "text": "给他发消息，晚点开会", "source": "simulated",
+            }),
+        ])
+        result = app.understand_multimodal_command({"selected_contact": None, "pending_message": None}, now)
+        self.assertIn("将通过常用消息应用向张三发送", result["message"])
+        self.assertTrue(result["llm"]["used"])
+        self.assertIn("本地大模型个性化依据", result["explanation"][-1])
+
+    def test_llm_cannot_replace_a_cancel_operation_result(self):
+        app.LOCAL_LLM_ENABLED = True
+        app.enhance_local_response = lambda **_kwargs: {
+            "response": "不应覆盖取消结果",
+            "conflict_explanation": "",
+            "personalization_reason": "",
+        }
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append(self.event("speech_text", now, {
+            "page": "message", "text": "取消发送", "source": "simulated",
+        }))
+        result = app.understand_multimodal_command(
+            {"selected_contact": "contact_zhangsan", "pending_message": None}, now,
+        )
+        self.assertIn("已取消当前联系人选择", result["message"])
 
 
 if __name__ == "__main__":
