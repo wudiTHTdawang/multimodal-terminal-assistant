@@ -15,6 +15,9 @@ let handGestureLatched;
 let lastHandGestureAt = 0;
 let handMotionHistory = [];
 let handGestureSuppressHeadUntil = 0;
+let palmPoseCandidate;
+let stablePalmPose;
+let stablePalmPoseAt = 0;
 let lastFacePresence;
 let latestEyeFeatures;
 let gazeMapper;
@@ -66,18 +69,19 @@ const CONTACT_GAZE_PROMPT_DWELL_MS = 650;
 // 摄像头每帧的视线落点会有轻微抖动。短暂保留上一候选，既避免黄色框闪烁，
 // 也避免联系人确认的累计时间反复归零。
 const GAZE_CANDIDATE_HOLD_MS = 420;
-const MUSIC_GAZE_MINIMUM_SCORE = 0.58;
+const MUSIC_GAZE_MINIMUM_SCORE = 0.54;
 // 只在持续候选超过一个较长的间隔后才学习一次，避免把每帧检测噪声写入校准记录。
 const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
 const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
 const HAND_GESTURE_INTERVAL_MS = 120;
 const HAND_GESTURE_DWELL_MS = 360;
-const HAND_PALM_DWELL_MS = 320;
 const HAND_WAVE_DWELL_MS = 180;
 const HAND_GESTURE_CANDIDATE_GAP_MS = 360;
 const HAND_WAVE_WINDOW_MS = 680;
 const HAND_WAVE_MIN_HORIZONTAL_SPAN = 0.20;
 const HAND_WAVE_MAX_VERTICAL_SPAN = 0.18;
+const PALM_POSE_DWELL_MS = 180;
+const PALM_TOGGLE_TRANSITION_WINDOW_MS = 1100;
 const HAND_GESTURE_COOLDOWN_MS = 650;
 const HAND_GESTURE_HEAD_SUPPRESS_MS = 900;
 const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
@@ -438,7 +442,7 @@ function musicCardGazeScore(node, prediction) {
   const point = { x, y };
   const distance = distanceToRect(point, rect);
   // 整张播放卡片均为有效区域，并允许约一个文本行高度的校准误差。
-  const tolerance = Math.max(32, Math.min(72, Math.min(rect.width, rect.height) * 0.35));
+  const tolerance = Math.max(48, Math.min(120, Math.min(rect.width, rect.height) * 0.60));
   if (distance > tolerance) return 0;
   const spatialMatch = 1 - distance / tolerance;
   return 0.62 + spatialMatch * 0.30 + prediction.confidence * 0.08;
@@ -892,10 +896,10 @@ function updateGazeTarget(prediction) {
       return;
     }
   }
-  const requiredDwellMs = 700;
+  const requiredDwellMs = strictMusicGaze ? 550 : 700;
   if (!gazeTargetLocked && performance.now() - gazeTargetSince >= requiredDwellMs) {
     const averageScore = gazeCandidateScores.reduce((sum, sample) => sum + sample.score, 0) / gazeCandidateScores.length;
-    if (strictMusicGaze && (gazeCandidateScores.length < 4 || averageScore < 0.64)) return;
+    if (strictMusicGaze && (gazeCandidateScores.length < 3 || averageScore < 0.60)) return;
     gazeTargetLocked = true;
     if (strictMusicGaze) {
       showMusicGazeSuggestion(closest, bestCandidate.zone, averageScore);
@@ -1137,7 +1141,10 @@ async function enableHandGestures() {
     handGestureCandidate = undefined;
     handGestureLatched = undefined;
     handGestureSuppressHeadUntil = 0;
-    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，张开手掌暂停 / 继续，横向挥动张开的手掌切下一首。');
+    palmPoseCandidate = undefined;
+    stablePalmPose = undefined;
+    stablePalmPoseAt = 0;
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，手掌开合暂停 / 继续，横向挥动张开的手掌切下一首。');
   } catch (error) {
     handGesturesEnabled = false;
     setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
@@ -1218,8 +1225,8 @@ async function applyHandGesture(gesture, confidence) {
       return true;
     }
   }
-  if (gesture === 'Palm_Front' && activeMode && currentTrack) {
-    await recordHandGesture('toggle_playback', 'Palm_Front', 'music_playback', 'music', confidence);
+  if (gesture === 'Palm_Toggle' && activeMode && currentTrack) {
+    await recordHandGesture('toggle_playback', 'Palm_Toggle', 'music_playback', 'music', confidence);
     toggleDemoPlayback();
     return true;
   }
@@ -1267,20 +1274,60 @@ function detectPalmWave(landmarks, now, openPalm) {
   return horizontalSpan >= HAND_WAVE_MIN_HORIZONTAL_SPAN && verticalSpan <= HAND_WAVE_MAX_VERTICAL_SPAN;
 }
 
+function updatePalmToggleState(palmState, now) {
+  if (!palmState) {
+    palmPoseCandidate = undefined;
+    stablePalmPose = undefined;
+    stablePalmPoseAt = 0;
+    return false;
+  }
+  if (!palmPoseCandidate || palmPoseCandidate.state !== palmState) {
+    palmPoseCandidate = { state: palmState, since: now };
+    return false;
+  }
+  if (now - palmPoseCandidate.since < PALM_POSE_DWELL_MS || stablePalmPose === palmState) return false;
+  const isTransition = stablePalmPose
+    && stablePalmPose !== palmState
+    && now - stablePalmPoseAt <= PALM_TOGGLE_TRANSITION_WINDOW_MS;
+  stablePalmPose = palmState;
+  stablePalmPoseAt = now;
+  return isTransition;
+}
+
 function observeHandGesture(result, now) {
   const landmarks = result.handLandmarks?.[0];
   const category = result.gestures?.[0]?.[0];
   let gesture = category?.categoryName;
   const confidence = category?.score || 0;
   const openPalm = gesture === 'Open_Palm' || isLikelyOpenPalm(landmarks);
+  const palmState = openPalm ? 'open' : gesture === 'Closed_Fist' && confidence >= 0.65 ? 'closed' : undefined;
+  const palmToggle = updatePalmToggleState(palmState, now);
   if (detectPalmWave(landmarks, now, openPalm)) {
     gesture = 'Palm_Wave';
-  } else if (openPalm) {
-    // 不再要求掌心法线精准朝向摄像头；识别到张开的手掌即可触发播放控制。
-    gesture = 'Palm_Front';
+  } else if (palmToggle) {
+    handGestureCandidate = undefined;
+    handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
+    if (handGestureLatched || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
+    handGestureLatched = 'Palm_Toggle';
+    lastHandGestureAt = now;
+    void applyHandGesture('Palm_Toggle', 0.8).then((handled) => {
+      setHandGestureStatus(handled
+        ? '已通过手掌开合处理。'
+        : '已识别手掌开合；当前没有可控制的音乐。');
+    });
+    return;
+  } else if (palmState) {
+    handGestureCandidate = undefined;
+    handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
+    if (!handGestureLatched) {
+      setHandGestureStatus(palmState === 'open'
+        ? '已识别张开手掌：原位握拳可暂停 / 继续；横向挥动可切下一首。'
+        : '已识别握拳：原位张开手掌可暂停 / 继续。');
+    }
+    return;
   }
-  const minimumConfidence = gesture === 'Palm_Front' ? 0.50 : gesture === 'Palm_Wave' ? 0 : 0.72;
-  if (!['Thumb_Up', 'Thumb_Down', 'Palm_Front', 'Palm_Wave'].includes(gesture) || confidence < minimumConfidence) {
+  const minimumConfidence = ['Palm_Toggle', 'Palm_Wave'].includes(gesture) ? 0 : 0.72;
+  if (!['Thumb_Up', 'Thumb_Down', 'Palm_Toggle', 'Palm_Wave'].includes(gesture) || confidence < minimumConfidence) {
     if (handGestureCandidate && now - handGestureCandidate.lastSeen <= HAND_GESTURE_CANDIDATE_GAP_MS) return;
     handGestureCandidate = undefined;
     handGestureLatched = undefined;
@@ -1294,13 +1341,13 @@ function observeHandGesture(result, now) {
   }
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
     handGestureCandidate = { gesture, confidence, since: now, lastSeen: now };
-    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '张开手掌' : '横向挥手';
+    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Toggle' ? '手掌开合' : '横向挥手';
     setHandGestureStatus(`检测到${label}，请保持片刻确认。`);
     return;
   }
   handGestureCandidate.confidence = Math.min(handGestureCandidate.confidence, confidence);
   handGestureCandidate.lastSeen = now;
-  const dwellMs = gesture === 'Palm_Front' ? HAND_PALM_DWELL_MS : gesture === 'Palm_Wave' ? HAND_WAVE_DWELL_MS : HAND_GESTURE_DWELL_MS;
+  const dwellMs = gesture === 'Palm_Toggle' ? 0 : gesture === 'Palm_Wave' ? HAND_WAVE_DWELL_MS : HAND_GESTURE_DWELL_MS;
   if (now - handGestureCandidate.since < dwellMs || now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
   const stableGesture = handGestureCandidate;
   handGestureCandidate = undefined;
@@ -1432,6 +1479,9 @@ function stopCamera(showMessage = true) {
   handGestureLatched = undefined;
   handMotionHistory = [];
   handGestureSuppressHeadUntil = 0;
+  palmPoseCandidate = undefined;
+  stablePalmPose = undefined;
+  stablePalmPoseAt = 0;
   lastHandDetectionAt = 0;
   latestEyeFeatures = undefined;
   eyeFeatureHistory = [];
@@ -1582,7 +1632,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '持续注视歌曲播放卡片约 0.7 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：张开手掌可暂停 / 继续，横向挥动张开的手掌可切下一首。';
+    : '持续注视歌曲播放卡片约 0.55 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：原位开合手掌可暂停 / 继续，横向挥动张开的手掌可切下一首。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${musicCardSelected ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
