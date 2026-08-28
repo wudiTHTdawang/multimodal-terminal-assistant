@@ -15,6 +15,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from llm_reasoner import enhance_local_response
+
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -24,6 +26,7 @@ AUTHORIZED_DIR = DATA_DIR / "authorized_memos"
 EVENT_TTL_MS = 10_000
 EVENT_BUFFER_LIMIT = 100
 DEFAULT_PROFILE_ID = "user_xiaoyu"
+LOCAL_LLM_ENABLED = True
 PROFILE_STATE_FIELDS = (
     "focus_mode", "active_mode", "selected_contact", "authorized_sources", "reminders",
     "completed_events", "preference_adjustments", "track_preferences",
@@ -430,6 +433,32 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
     fusion = summarize_multimodal_alignment(events, speech["payload"].get("page", "unknown"), speech_timestamp_ms, intent)
     result["fusion"] = fusion
     result.setdefault("explanation", []).append(f"多模态综合判断：{fusion['summary']}")
+    # 大模型不参与意图、对象或执行决策：只解释已经通过安全规则的结构化结论。
+    # 模型不可用、冷启动或超时时，立即保留规则模板结果，避免影响 <5 秒目标。
+    profile = next(
+        (item for item in read_json(DATA_DIR / "profiles_demo.json") if item["id"] == state.get("active_profile_id")),
+        {},
+    )
+    llm_result = None
+    if LOCAL_LLM_ENABLED:
+        llm_result = enhance_local_response(
+            scene=speech["payload"].get("page", "unknown"),
+            speech_text=speech["payload"].get("text", ""),
+            rule_result=result,
+            fusion=fusion,
+            profile=profile,
+        )
+    result["llm"] = {"used": bool(llm_result), "model": "qwen2.5:3b-instruct"}
+    if llm_result:
+        if llm_result.get("conflict_explanation"):
+            result["explanation"].append(f"本地大模型冲突解释：{llm_result['conflict_explanation']}")
+        if llm_result.get("personalization_reason"):
+            result["explanation"].append(f"本地大模型个性化依据：{llm_result['personalization_reason']}")
+        # 只在不涉及待确认的高风险操作时替换为自然语言答复。
+        if llm_result.get("response") and not result.get("pending") and not result.get("simulated_send"):
+            result["message"] = llm_result["response"]
+    else:
+        result["explanation"].append("本地大模型本轮未在时限内返回，已使用安全规则模板。")
     return result
 
 

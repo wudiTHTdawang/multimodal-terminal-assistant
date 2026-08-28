@@ -13,11 +13,14 @@ import app
 class MultimodalUnderstandingTests(unittest.TestCase):
     def setUp(self):
         self.original_save_state = app.save_state
+        self.original_llm_enabled = app.LOCAL_LLM_ENABLED
         app.save_state = lambda _state: None
+        app.LOCAL_LLM_ENABLED = False
         app.MULTIMODAL_EVENT_BUFFER.clear()
 
     def tearDown(self):
         app.save_state = self.original_save_state
+        app.LOCAL_LLM_ENABLED = self.original_llm_enabled
         app.MULTIMODAL_EVENT_BUFFER.clear()
 
     @staticmethod
