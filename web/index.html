@@ -15,10 +15,10 @@
       <div class="header-tools">
         <div class="camera-switcher" aria-label="全局摄像头控制">
           <p id="camera-status" class="camera-status" role="status">摄像头未开启</p>
-          <button class="camera-button" id="start-camera">开启摄像头</button>
+          <button class="camera-button" id="start-camera">开启摄像头与手势</button>
           <button class="camera-button" id="calibrate-gaze" disabled>校准视线</button>
           <button class="camera-button" id="clear-gaze-calibration" disabled>清除校准</button>
-          <button class="camera-button" id="stop-camera" disabled>关闭</button>
+          <button class="camera-button" id="stop-camera" disabled>关闭摄像头与手势</button>
         </div>
         <label class="profile-select">演示用户 <select id="profile"></select></label>
       </div>
@@ -31,6 +31,7 @@
         <canvas id="face-overlay" aria-label="人脸关键点调试叠加层"></canvas>
       </div>
       <p class="gaze-feedback" id="gaze-feedback">开启摄像头后可进行视线校准。</p>
+      <p class="hand-gesture-status" id="hand-gesture-status">手势识别未开启。</p>
       <p class="camera-privacy">预览不上传、不录像；关闭或离开页面时将停止。</p>
     </aside>
 
@@ -64,26 +65,47 @@
         </div>
         <button class="primary" id="prepare-message">提交模拟语音指令</button>
         <div class="result" id="message-result"></div>
+        <details class="multimodal-inspector" id="multimodal-inspector">
+          <summary>查看本轮本地多模态处理记录</summary>
+          <p>仅显示最近 10 秒的结构化事件，用于演示与联调；不会展示或保存摄像头画面、人脸关键点或原始音频。</p>
+          <button class="secondary" id="refresh-multimodal-events">刷新记录</button>
+          <div class="multimodal-event-list" id="multimodal-event-list">展开后可查看本轮事件。</div>
+        </details>
       </section>
 
       <section class="page" id="music-page">
         <p class="section-label">场景 B · 明确场景模式 + 本地音乐偏好</p>
         <h2>音乐</h2>
-        <p>选择专注、开车或娱乐模式后，再通过注视音乐卡片和语音“播放这个”选择音乐。每次播放、喜欢或跳过都会只在当前模式下记录偏好。</p>
+        <p>选择专注、开车或娱乐模式后，系统会从本地模拟音乐平台检索一首适合当前状态的歌曲。推荐会结合当前模式的偏好歌单与该模式下的平台大众常听歌曲，并随你的反馈实时更新。</p>
         <div class="mode-grid" id="modes"></div>
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
-        <div class="card-grid muted" id="genres"></div>
         <div class="result" id="music-result"></div>
+        <label>模拟语音指令<textarea id="music-command" placeholder="例如：取消当前歌曲选择"></textarea></label>
+        <div class="speech-presets">
+          <button class="secondary music-speech-preset" data-text="取消当前歌曲选择">预设：取消歌曲选择</button>
+          <button class="secondary music-speech-preset" data-text="下一首">预设：下一首</button>
+        </div>
+        <button class="primary" id="prepare-music-command">提交模拟语音指令</button>
       </section>
 
       <section class="page" id="memo-page">
         <p class="section-label">场景 C · 用户授权的本地备忘录</p>
         <h2>日程安排</h2>
-        <p>点击下方按钮后可一次选择多个 `.txt`、`.md` 或 `.json` 备忘录。新选择的文件集会替换旧授权列表，避免遗留文件混入结果。</p>
+        <p>可授权多个 `.txt`、`.md` 或 `.json` 备忘录。文件选择窗口中按住 <kbd>Ctrl</kbd> 可逐个多选、按住 <kbd>Shift</kbd> 可选择连续文件。浏览器不会在后台读取你的文件；文件改动后，请重新选择该文件以更新本地授权副本。</p>
         <input id="memo-file" type="file" accept=".txt,.md,.json" multiple hidden />
-        <button class="secondary" id="choose-memo">选择并授权多个备忘录文件</button>
+        <div class="authorization-actions">
+          <button class="secondary" id="choose-memo">选择并授权备忘录文件</button>
+          <button class="secondary" id="sync-memo">选择更新后的文件并同步</button>
+        </div>
         <p class="authorization-status" id="authorization-status">尚未选择授权备忘录文件。</p>
+        <div class="authorized-file-list" id="authorized-files"></div>
+        <label>模拟语音查询<textarea id="schedule-content" placeholder="例如：我明天有什么安排？"></textarea></label>
+        <div class="speech-presets">
+          <button class="secondary schedule-speech-preset" data-text="我今天有什么安排？">预设：今天安排</button>
+          <button class="secondary schedule-speech-preset" data-text="我明天有什么安排？">预设：明天安排</button>
+        </div>
+        <button class="primary" id="prepare-schedule">提交模拟语音查询</button>
         <button class="primary" id="query-schedule">查看所有已授权日程</button>
         <div class="result" id="memo-result"></div>
       </section>

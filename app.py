@@ -8,7 +8,7 @@ import hashlib
 import re
 import time
 from threading import Lock
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +31,17 @@ def read_json(path: Path):
         return json.load(file)
 
 
+def read_memo_text(path: Path):
+    """兼容 Windows 记事本常见的 UTF-8 与 GB18030 备忘录编码。"""
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"无法识别 {path.name} 的文本编码，请保存为 UTF-8 或 GB18030 后重试。")
+
+
 def default_state():
     return {
         "focus_mode": False,
@@ -40,6 +51,9 @@ def default_state():
         "reminders": [],
         "completed_events": [],
         "preference_adjustments": {},
+        "track_preferences": {},
+        "mode_preference_playlists": {},
+        "recommendation_turns": {},
         "pending_message": None,
     }
 
@@ -60,6 +74,9 @@ def load_state():
     adjustments = state.get("preference_adjustments", {})
     if any(isinstance(value, int) for value in adjustments.values()):
         state["preference_adjustments"] = {"focus": adjustments}
+    state["track_preferences"] = state.get("track_preferences") if isinstance(state.get("track_preferences"), dict) else {}
+    state["mode_preference_playlists"] = state.get("mode_preference_playlists") if isinstance(state.get("mode_preference_playlists"), dict) else {}
+    state["recommendation_turns"] = state.get("recommendation_turns") if isinstance(state.get("recommendation_turns"), dict) else {}
     return state
 
 
@@ -93,8 +110,8 @@ def record_multimodal_event(event):
     if not isinstance(event, dict):
         raise ValueError("event 必须是对象。")
     modality = str(event.get("modality", "")).strip()
-    if modality not in {"gaze", "screen_context", "speech_text", "head_gesture"}:
-        raise ValueError("modality 仅支持 gaze、screen_context、speech_text 或 head_gesture。")
+    if modality not in {"gaze", "screen_context", "speech_text", "head_gesture", "hand_gesture"}:
+        raise ValueError("modality 仅支持 gaze、screen_context、speech_text、head_gesture 或 hand_gesture。")
     timestamp_ms = event.get("timestamp_ms")
     if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
         raise ValueError("timestamp_ms 必须是正整数毫秒时间戳。")
@@ -112,9 +129,9 @@ def record_multimodal_event(event):
             raise ValueError("dwell_ms 必须是非负整数。")
     if modality == "speech_text" and not str(payload.get("text", "")).strip():
         raise ValueError("speech_text 事件必须包含非空 text。")
-    if modality == "head_gesture":
-        if payload.get("page") != "message" or payload.get("decision") not in {"confirm", "reject"}:
-            raise ValueError("head_gesture 事件必须包含消息页和 confirm/reject 决策。")
+    if modality in {"head_gesture", "hand_gesture"}:
+        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject", "toggle_playback", "skip_track"}:
+            raise ValueError("视觉手势事件必须包含支持的页面和决策。")
 
     received_at_ms = current_time_ms()
     stored = {
@@ -143,16 +160,38 @@ def find_contact(contact_id):
 
 def parse_simulated_speech(text):
     normalized = re.sub(r"\s+", "", text)
+    if normalized in {"取消当前歌曲选择", "取消歌曲选择", "取消音乐选择", "不选这首", "不操作这首"}:
+        return "cancel_music_selection", ""
+    if normalized in {"下一首", "切下一首", "换一首"}:
+        return "next_track", ""
     if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
         return "cancel", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
         return "confirm", ""
+    if "安排" in normalized or "日程" in normalized:
+        if "明天" in normalized:
+            return "query_schedule_tomorrow", ""
+        if "今天" in normalized:
+            return "query_schedule_today", ""
+        if any(word in normalized for word in ("全部", "所有", "最近")):
+            return "query_schedule_all", ""
     match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
         return "send_message", match.group(1).strip()
     if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息")):
         return "send_message", ""
     return "unknown", ""
+
+
+def visible_target_ids(events, page, timestamp_ms):
+    return {
+        target.get("target_id")
+        for context in events
+        if context["modality"] == "screen_context"
+        and context["payload"].get("page") == page
+        and abs(context["timestamp_ms"] - timestamp_ms) <= 5_000
+        for target in context["payload"].get("visible_targets", [])
+    }
 
 
 def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
@@ -166,15 +205,28 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
     intent, content = parse_simulated_speech(str(speech["payload"].get("text", "")))
 
+    if intent == "cancel_music_selection":
+        return {"message": "已取消当前歌曲选择；你可以重新注视并确认另一首歌曲。", "intent": intent, "explanation": [f"识别到音乐取消指令：{speech['payload']['text']}"]}
+    if intent == "next_track":
+        return {"message": "已识别切换下一首指令。", "intent": intent, "explanation": [f"识别到音乐指令：{speech['payload']['text']}"]}
+
     if intent in {"confirm", "cancel"}:
         pending = state.get("pending_message")
-        if not pending:
+        if intent == "confirm" and not pending:
             return {"message": "当前没有待确认的消息操作。", "intent": intent, "explanation": ["未检测到待确认任务。"]}
         state["pending_message"] = None
         state["selected_contact"] = None
         save_state(state)
-        message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送。"
+        if intent == "cancel" and not pending:
+            return {"message": "已取消当前联系人选择，可以重新选择联系人。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到取消指令：{speech['payload']['text']}", "已清除当前联系人选择。"]}
+        message = "模拟发送成功。" if intent == "confirm" else "已取消本次发送，并清除当前联系人选择。"
         return {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
+
+    if intent in {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all"}:
+        result = understand_schedule_query(state, intent, speech)
+        result["intent"] = intent
+        result["explanation"] = [f"识别到模拟语音：{speech['payload']['text']}", "仅读取用户已授权的本地备忘录，不修改日程完成状态。"]
+        return result
 
     if intent != "send_message":
         return {"message": "暂未理解该模拟语音。可尝试“给他发消息，晚点开会”。", "intent": "unknown", "explanation": ["未匹配到当前支持的消息指令。"]}
@@ -233,18 +285,57 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
     }
 
 
-def choose_track(genre: str, exclude_id: str | None = None):
-    tracks = read_json(DATA_DIR / "music_library.json")
-    matching = [track for track in tracks if track["genre"] == genre]
-    if not matching:
-        return tracks[0]
-    return next((track for track in matching if track["id"] != exclude_id), matching[0])
+DEMO_COMMON_TRACKS = {
+    "general": ["track_031", "track_024", "track_010", "track_026", "track_012"],
+    "focus": ["track_010", "track_015", "track_018", "track_022", "track_004"],
+    "driving": ["track_012", "track_028", "track_030", "track_007", "track_008"],
+    "entertainment": ["track_024", "track_026", "track_013", "track_025", "track_027"],
+}
 
 
-def record_music_preference(state, mode: str, genre: str, delta: int):
-    adjustments = state["preference_adjustments"].setdefault(mode, {})
-    adjustments[genre] = adjustments.get(genre, 0) + delta
-    return adjustments[genre]
+def tracks_by_id():
+    return {track["id"]: track for track in read_json(DATA_DIR / "music_library.json")}
+
+
+def mode_preference_playlist(state, mode):
+    track_index = tracks_by_id()
+    ids = state["mode_preference_playlists"].get(mode, [])
+    return [track_index[track_id] for track_id in ids if track_id in track_index]
+
+
+def record_track_preference(state, mode, track_id, delta, add_to_playlist=False):
+    scores = state["track_preferences"].setdefault(mode, {})
+    score = scores.get(track_id, 0) + delta
+    scores[track_id] = score
+    playlist = state["mode_preference_playlists"].setdefault(mode, [])
+    if add_to_playlist and track_id not in playlist:
+        playlist.append(track_id)
+    if score < 0 and track_id in playlist:
+        playlist.remove(track_id)
+    return score
+
+
+def recommend_track(state, mode, exclude_id=None):
+    track_index = tracks_by_id()
+    candidates = [track for track in track_index.values() if (mode == "general" or mode in track.get("moods", [])) and track["id"] != exclude_id]
+    if not candidates:
+        candidates = [track for track in track_index.values() if track["id"] != exclude_id] or list(track_index.values())
+
+    common_ids = [track_id for track_id in DEMO_COMMON_TRACKS[mode] if track_id in track_index and track_id != exclude_id]
+    scores = state["track_preferences"].get(mode, {})
+    preferred_ids = [track["id"] for track in mode_preference_playlist(state, mode) if track["id"] != exclude_id and scores.get(track["id"], 0) >= 0]
+    turn = state["recommendation_turns"].get(mode, 0)
+    state["recommendation_turns"][mode] = turn + 1
+
+    # 每三次至少推荐一次该模式的本地大众常听曲目，避免推荐只困在历史偏好里。
+    if common_ids and (not preferred_ids or turn % 3 == 2):
+        return track_index[common_ids[turn % len(common_ids)]], "该模式下的平台大众常听"
+    if preferred_ids:
+        ranked_ids = sorted(preferred_ids, key=lambda track_id: scores.get(track_id, 0), reverse=True)
+        return track_index[ranked_ids[0]], "你的本模式偏好歌单"
+    if common_ids:
+        return track_index[common_ids[0]], "该模式下的平台大众常听"
+    return candidates[0], "与当前模式匹配"
 
 
 def parse_memo_file(path: Path):
@@ -256,7 +347,7 @@ def parse_memo_file(path: Path):
         return entries
 
     entries = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, raw_line in enumerate(read_memo_text(path).splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -326,7 +417,41 @@ def schedule_items(state):
     return sorted(items, key=lambda item: (item.get("date", "9999-99-99"), item.get("time", "99:99")))
 
 
+def schedule_query_result(state, target_date=None, title="全部日程"):
+    if not state["authorized_sources"]:
+        raise ValueError("请先授权备忘录文件。")
+    items = schedule_items(state)
+    if target_date:
+        items = [item for item in items if item.get("date") == target_date]
+    return {
+        "message": f"已整理{title}。",
+        "title": title,
+        "items": items,
+        "total": len(items),
+        "completed": sum(item["is_completed"] for item in items),
+        "past": sum(item["is_past"] for item in items),
+    }
+
+
+def understand_schedule_query(state, intent, speech):
+    reference = datetime.now()
+    if intent == "query_schedule_today":
+        return schedule_query_result(state, reference.strftime("%Y-%m-%d"), f"今天（{reference:%Y-%m-%d}）日程")
+    if intent == "query_schedule_tomorrow":
+        date = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+        return schedule_query_result(state, date.strftime("%Y-%m-%d"), f"明天（{date:%Y-%m-%d}）日程")
+    return schedule_query_result(state, title="全部已授权日程")
+
+
 class AssistantHandler(SimpleHTTPRequestHandler):
+    # Python 在部分 Windows 环境中不会为 .mjs 注册 JavaScript 类型，
+    # 浏览器会因此拒绝动态 import。显式声明本地视觉运行时所需的类型。
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        ".mjs": "application/javascript",
+        ".wasm": "application/wasm",
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
@@ -437,8 +562,26 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 raise ValueError("不支持的音乐模式。")
             state["active_mode"] = mode
             state["focus_mode"] = mode == "focus"
+            track, reason = recommend_track(state, mode)
             save_state(state)
-            return {"message": f"已进入{payload['mode_label']}，请选择想播放的音乐。"}
+            return {
+                "message": f"已进入{payload['mode_label']}，已为你检索一首适合当前状态的歌曲。",
+                "track": track,
+                "recommendation_reason": reason,
+                "preference_playlist": mode_preference_playlist(state, mode),
+            }
+
+        if action == "start_general_music":
+            state["active_mode"] = "general"
+            state["focus_mode"] = False
+            track, reason = recommend_track(state, "general")
+            save_state(state)
+            return {
+                "message": "未选择特定模式，已为你推荐近期热门歌曲。",
+                "track": track,
+                "recommendation_reason": "近期热门歌曲",
+                "preference_playlist": mode_preference_playlist(state, "general"),
+            }
 
         if action == "stop_mode":
             clear_active_music_mode(state)
@@ -450,49 +593,78 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             save_state(state)
             return {"message": "已结束音乐模式会话。"}
 
-        if action == "play_genre":
-            mode = state["active_mode"]
-            if not mode:
-                raise ValueError("请先选择专注、开车或娱乐模式。")
-            track = choose_track(payload["genre"])
-            record_music_preference(state, mode, track["genre"], 1)
-            save_state(state)
-            return {
-                "message": f"正在播放：{track['title']}。已记录本次{payload['mode_label']}播放偏好。",
-                "track": track,
-                "mode": mode,
-            }
-
         if action == "like_track":
-            mode = state["active_mode"]
+            mode = state["active_mode"] or "general"
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
-            genre = payload["genre"]
-            adjustment = record_music_preference(state, mode, genre, 2)
+            track_id = payload["track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            adjustment = record_track_preference(state, mode, track_id, 3, add_to_playlist=True)
             save_state(state)
-            return {"message": "已记录喜欢反馈，当前歌曲继续播放。", "adjustment": adjustment}
+            label = "通用偏好歌单" if mode == "general" else "当前模式的偏好歌单"
+            return {"message": f"已加入{label}，当前歌曲继续播放。", "adjustment": adjustment, "preference_playlist": mode_preference_playlist(state, mode)}
+
+        if action == "complete_track":
+            mode = state["active_mode"] or "general"
+            if not mode:
+                raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
+            track_id = payload["track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            adjustment = record_track_preference(state, mode, track_id, 1, add_to_playlist=True)
+            track, reason = recommend_track(state, mode, track_id)
+            save_state(state)
+            label = "通用偏好歌单" if mode == "general" else "当前模式的偏好歌单"
+            return {"message": f"已检测到完整收听，并加入{label}。正在播放：{track['title']}。", "adjustment": adjustment, "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
+
+        if action == "advance_track":
+            mode = state["active_mode"] or "general"
+            if not mode:
+                raise ValueError("当前没有启用音乐模式。")
+            track_id = payload["current_track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            track, reason = recommend_track(state, mode, track_id)
+            save_state(state)
+            return {"message": f"正在播放：{track['title']}。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action == "next_track":
-            mode = state["active_mode"]
+            mode = state["active_mode"] or "general"
+            if not mode:
+                raise ValueError("当前没有启用音乐模式。")
+            track_id = payload["current_track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            track, reason = recommend_track(state, mode, track_id)
+            save_state(state)
+            return {"message": f"已切换到下一首：{track['title']}。本次未改变偏好。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
+
+        if action == "dislike_track":
+            mode = state["active_mode"] or "general"
             if not mode:
                 raise ValueError("当前没有启用音乐模式，无法记录模式偏好。")
-            genre = payload["genre"]
-            record_music_preference(state, mode, genre, -1)
-            track = choose_track(genre, payload.get("current_track_id"))
-            record_music_preference(state, mode, track["genre"], 1)
+            track_id = payload["current_track_id"]
+            if track_id not in tracks_by_id():
+                raise ValueError("当前歌曲不在本地音乐库中。")
+            record_track_preference(state, mode, track_id, -2)
+            track, reason = recommend_track(state, mode, track_id)
             save_state(state)
-            return {"message": f"已跳过当前歌曲，正在播放：{track['title']}。", "track": track}
+            return {"message": f"已降低这首歌的偏好值，正在播放：{track['title']}。", "track": track, "recommendation_reason": reason, "preference_playlist": mode_preference_playlist(state, mode)}
 
         if action in {"authorize_memo_file", "authorize_memo_files"}:
             files = payload.get("files") or [{
                 "file_name": payload.get("file_name"),
                 "file_content": payload.get("file_content"),
             }]
+            authorization_mode = payload.get("authorization_mode", "merge")
             if not isinstance(files, list) or not 1 <= len(files) <= 10:
                 raise ValueError("请一次选择 1 至 10 个备忘录文件。")
+            if authorization_mode not in {"merge", "replace"}:
+                raise ValueError("不支持的备忘录授权方式。")
 
             AUTHORIZED_DIR.mkdir(exist_ok=True)
-            sources, total_items, names = [], 0, set()
+            sources, total_items, names, prepared = [], 0, set(), []
             for uploaded in files:
                 filename = Path(str(uploaded["file_name"])).name
                 suffix = Path(filename).suffix.lower()
@@ -503,20 +675,63 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                     raise ValueError("仅支持 .txt、.md 和 .json 格式的备忘录。")
                 if not content.strip() or len(content.encode("utf-8")) > 1_000_000:
                     raise ValueError("每个备忘录内容不能为空，且大小不能超过 1 MB。")
-                stored_path = AUTHORIZED_DIR / filename
+                content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+                stored_name = f"{content_hash}_{filename}"
+                stored_path = AUTHORIZED_DIR / stored_name
                 stored_path.write_text(content, encoding="utf-8")
                 items = parse_memo_file(stored_path)
                 if not items:
                     raise ValueError(f"{filename} 中没有可读取的事项。")
                 names.add(filename)
                 total_items += len(items)
-                sources.append({"display_name": filename, "stored_name": filename})
+                sources.append({"display_name": filename, "stored_name": stored_name, "item_count": len(items)})
+                prepared.append(stored_path)
 
-            state["authorized_sources"] = sources
+            # 全部新文件通过校验后才更新授权列表。默认按文件名合并：
+            # 用户重新选择同名文件时，新的内容快照会替换旧快照，其余已授权文件保留。
+            old_sources = state.get("authorized_sources", [])
+            for source in old_sources:
+                if "item_count" not in source:
+                    old_path = AUTHORIZED_DIR / source.get("stored_name", "")
+                    try:
+                        source["item_count"] = len(parse_memo_file(old_path))
+                    except (OSError, ValueError):
+                        source["item_count"] = 0
+            if authorization_mode == "replace":
+                final_sources = sources
+            else:
+                final_sources = [source for source in old_sources if source.get("display_name") not in names] + sources
+
+            authorized_root = AUTHORIZED_DIR.resolve()
+            kept_files = {source["stored_name"] for source in final_sources}
+            for old_source in old_sources:
+                old_path = (AUTHORIZED_DIR / old_source.get("stored_name", "")).resolve()
+                if old_path.parent == authorized_root and old_path.exists() and old_path.name not in kept_files:
+                    old_path.unlink()
+            state["authorized_sources"] = final_sources
+            valid_event_keys = {item["event_key"] for item in schedule_items(state)}
+            state["completed_events"] = [key for key in state.get("completed_events", []) if key in valid_event_keys]
             save_state(state)
             return {
-                "message": f"已授权 {len(sources)} 个文件，共读取 {total_items} 条事项；内容仅保存在本地。",
-                "sources": sources,
+                "message": f"已记住 {len(final_sources)} 个授权文件；本次读取 {total_items} 条事项。",
+                "sources": final_sources,
+            }
+
+        if action == "revoke_memo_file":
+            stored_name = Path(str(payload.get("stored_name", ""))).name
+            source = next((item for item in state.get("authorized_sources", []) if item.get("stored_name") == stored_name), None)
+            if not source:
+                raise ValueError("未找到该授权文件。")
+            state["authorized_sources"] = [item for item in state["authorized_sources"] if item.get("stored_name") != stored_name]
+            stored_path = (AUTHORIZED_DIR / stored_name).resolve()
+            if stored_path.parent == AUTHORIZED_DIR.resolve() and stored_path.exists():
+                stored_path.unlink()
+            valid_event_keys = {item["event_key"] for item in schedule_items(state)}
+            state["completed_events"] = [key for key in state.get("completed_events", []) if key in valid_event_keys]
+            save_state(state)
+            return {
+                "message": f"已取消对 {source.get('display_name', '该文件')} 的授权。",
+                "sources": state["authorized_sources"],
             }
 
         if action == "query_tomorrow":
@@ -537,16 +752,7 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             }
 
         if action == "query_schedule":
-            if not state["authorized_sources"]:
-                raise ValueError("请先授权备忘录文件。")
-            items = schedule_items(state)
-            return {
-                "message": "已整理所有已授权备忘录中的日程。",
-                "items": items,
-                "total": len(items),
-                "completed": sum(item["is_completed"] for item in items),
-                "past": sum(item["is_past"] for item in items),
-            }
+            return schedule_query_result(state)
 
         if action == "toggle_event_completion":
             event_key = str(payload["event_key"])
