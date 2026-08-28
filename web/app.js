@@ -15,7 +15,6 @@ let lastHandGestureAt = 0;
 let handMotionHistory = [];
 let handOpenSeenUntil = 0;
 let handGestureSuppressHeadUntil = 0;
-let palmPoseCandidate;
 let stablePalmPose;
 let stablePalmPoseAt = 0;
 let lastFacePresence;
@@ -80,8 +79,7 @@ const HAND_WAVE_WINDOW_MS = 900;
 const HAND_WAVE_MIN_HORIZONTAL_SPAN = 0.065;
 const HAND_WAVE_MIN_TOTAL_SPAN = 0.12;
 const HAND_WAVE_MAX_VERTICAL_SPAN = 0.34;
-const PALM_POSE_DWELL_MS = 120;
-const PALM_TOGGLE_TRANSITION_WINDOW_MS = 1100;
+const PALM_TOGGLE_TRANSITION_WINDOW_MS = 1600;
 const HAND_GESTURE_COOLDOWN_MS = 450;
 const HAND_GESTURE_HEAD_SUPPRESS_MS = 900;
 const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
@@ -1141,7 +1139,6 @@ async function enableHandGestures() {
     handGestureCandidate = undefined;
     handOpenSeenUntil = 0;
     handGestureSuppressHeadUntil = 0;
-    palmPoseCandidate = undefined;
     stablePalmPose = undefined;
     stablePalmPoseAt = 0;
     setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，手掌开合暂停 / 继续，横向或斜向挥动张开的手掌切下一首。');
@@ -1280,19 +1277,23 @@ function detectPalmWave(landmarks, now, waveEligible) {
 
 function updatePalmToggleState(palmState, now) {
   if (!palmState) {
-    palmPoseCandidate = undefined;
-    stablePalmPose = undefined;
-    stablePalmPoseAt = 0;
+    // 开合动作中分类器常会短暂给出“无手势”；在有限窗口内保留前一个端点。
+    if (stablePalmPose && now - stablePalmPoseAt > PALM_TOGGLE_TRANSITION_WINDOW_MS) {
+      stablePalmPose = undefined;
+      stablePalmPoseAt = 0;
+    }
     return false;
   }
-  if (!palmPoseCandidate || palmPoseCandidate.state !== palmState) {
-    palmPoseCandidate = { state: palmState, since: now };
+  if (!stablePalmPose) {
+    stablePalmPose = palmState;
+    stablePalmPoseAt = now;
     return false;
   }
-  if (now - palmPoseCandidate.since < PALM_POSE_DWELL_MS || stablePalmPose === palmState) return false;
-  const isTransition = stablePalmPose
-    && stablePalmPose !== palmState
-    && now - stablePalmPoseAt <= PALM_TOGGLE_TRANSITION_WINDOW_MS;
+  if (stablePalmPose === palmState) {
+    stablePalmPoseAt = now;
+    return false;
+  }
+  const isTransition = now - stablePalmPoseAt <= PALM_TOGGLE_TRANSITION_WINDOW_MS;
   stablePalmPose = palmState;
   stablePalmPoseAt = now;
   return isTransition;
@@ -1305,11 +1306,23 @@ function observeHandGesture(result, now) {
   const confidence = category?.score || 0;
   const openPalm = gesture === 'Open_Palm' || isLikelyOpenPalm(landmarks);
   if (openPalm) handOpenSeenUntil = now + 950;
-  const palmState = openPalm ? 'open' : gesture === 'Closed_Fist' && confidence >= 0.65 ? 'closed' : undefined;
+  const palmState = openPalm ? 'open' : gesture === 'Closed_Fist' && confidence >= 0.50 ? 'closed' : undefined;
   const palmToggle = updatePalmToggleState(palmState, now);
   // 挥动时分类器偶尔会短暂丢失“张开手掌”，仍在最近识别到张开的短窗口内追踪其轨迹。
   const waveEligible = Boolean(landmarks && now <= handOpenSeenUntil);
-  if (detectPalmWave(landmarks, now, waveEligible)) {
+  if (palmToggle) {
+    handGestureCandidate = undefined;
+    handMotionHistory = [];
+    handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
+    if (now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
+    lastHandGestureAt = now;
+    void applyHandGesture('Palm_Toggle', 0.8).then((handled) => {
+      setHandGestureStatus(handled
+        ? '已通过手掌开合处理。'
+        : '已识别手掌开合；当前没有可控制的音乐。');
+    });
+    return;
+  } else if (detectPalmWave(landmarks, now, waveEligible)) {
     handGestureCandidate = undefined;
     handMotionHistory = [];
     handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
@@ -1319,17 +1332,6 @@ function observeHandGesture(result, now) {
       setHandGestureStatus(handled
         ? '已通过斜向 / 横向挥手切换下一首。'
         : '已识别挥手；请先选中音乐播放卡片。');
-    });
-    return;
-  } else if (palmToggle) {
-    handGestureCandidate = undefined;
-    handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
-    if (now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
-    lastHandGestureAt = now;
-    void applyHandGesture('Palm_Toggle', 0.8).then((handled) => {
-      setHandGestureStatus(handled
-        ? '已通过手掌开合处理。'
-        : '已识别手掌开合；当前没有可控制的音乐。');
     });
     return;
   } else if (palmState) {
@@ -1484,7 +1486,6 @@ function stopCamera(showMessage = true) {
   handMotionHistory = [];
   handOpenSeenUntil = 0;
   handGestureSuppressHeadUntil = 0;
-  palmPoseCandidate = undefined;
   stablePalmPose = undefined;
   stablePalmPoseAt = 0;
   lastHandDetectionAt = 0;
