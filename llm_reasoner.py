@@ -46,6 +46,13 @@ def enhance_local_response(*, scene, speech_text, rule_result, fusion, profile):
             "intent": _safe_text(rule_result.get("intent"), 40),
             "message": _safe_text(rule_result.get("message"), 150),
             "needs_clarification": bool(rule_result.get("needs_clarification")),
+            # 日程只给聚合统计，不把备忘录正文交给语言模型。
+            "schedule_summary": {
+                "title": _safe_text(rule_result.get("title"), 50),
+                "total": rule_result.get("total"),
+                "completed": rule_result.get("completed"),
+                "past": rule_result.get("past"),
+            },
         },
         "fusion": {
             "modalities": fusion.get("modalities", []),

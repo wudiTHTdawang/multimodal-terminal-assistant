@@ -112,6 +112,8 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .schedule-box { display: grid; gap: 10px; }
 .schedule-summary { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; padding-bottom: 10px; border-bottom: 1px solid #e2e8f4; }
 .schedule-summary span { color: #61718d; font-size: 14px; }
+.assistant-answer { display: grid; gap: 4px; margin: 0; padding: 10px 12px; color: #234c91; border-radius: 9px; background: #f1f5ff; }
+.assistant-answer span { color: #4769a6; font-size: 12px; font-weight: 700; }
 .schedule-item { border: 1px solid #e1e7f3; border-left: 4px solid #5975d7; border-radius: 10px; background: #fdfefe; transition: .16s ease; }
 .schedule-item:hover { border-color: #8ba2e5; }
 .schedule-check { display: grid; grid-template-columns: 22px 142px 1fr; column-gap: 8px; align-items: center; max-width: none; padding: 13px 15px; cursor: pointer; font-weight: 400; }

@@ -1832,7 +1832,12 @@ function showSchedule(result) {
       </label>
     </article>`).join('');
   const fusionNote = fusionSummary(result);
-  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${items}</div>`;
+  const llmMessage = result.llm?.used && result.message
+    ? `<p class="assistant-answer"><span>个性化建议</span>${escapeHtml(result.message)}</p>` : '';
+  const llmReasons = (result.explanation || [])
+    .filter((item) => item.startsWith('本地大模型'))
+    .map((item) => `<small class="fusion-note">${escapeHtml(item)}</small>`).join('');
+  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${llmMessage}${llmReasons}${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${items}</div>`;
   document.querySelectorAll('[data-event-key]').forEach((checkbox) => {
     checkbox.addEventListener('change', async () => {
       try {
