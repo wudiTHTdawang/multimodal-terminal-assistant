@@ -119,7 +119,28 @@ def copy_text_to_windows_clipboard(text):
         raise ValueError("没有可复制的消息正文。")
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
-    if not user32.OpenClipboard(None):
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_bool
+    user32.CloseClipboard.restype = ctypes.c_bool
+    user32.EmptyClipboard.restype = ctypes.c_bool
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_bool
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+
+    opened = False
+    for _ in range(6):
+        if user32.OpenClipboard(None):
+            opened = True
+            break
+        time.sleep(0.05)
+    if not opened:
         raise OSError("无法访问剪贴板，请关闭正在占用剪贴板的程序后重试。")
     memory = None
     try:
@@ -133,7 +154,7 @@ def copy_text_to_windows_clipboard(text):
         locked = kernel32.GlobalLock(memory)
         if not locked:
             raise OSError("无法写入剪贴板。")
-        ctypes.memmove(locked, buffer, size)
+        ctypes.memmove(locked, ctypes.addressof(buffer), size)
         kernel32.GlobalUnlock(memory)
         if not user32.SetClipboardData(13, memory):  # CF_UNICODETEXT
             raise OSError("无法设置剪贴板文本。")
@@ -281,16 +302,19 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
         pending = state.get("pending_message")
         if intent == "confirm" and not pending:
             return {"message": "当前没有待确认的消息操作。", "intent": intent, "explanation": ["未检测到待确认任务。"]}
+        if intent == "cancel" and not pending:
+            state["pending_message"] = None
+            state["selected_contact"] = None
+            save_state(state)
+            return {"message": "已取消当前联系人选择，可以重新选择联系人。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到取消指令：{speech['payload']['text']}", "已清除当前联系人选择。"]}
+        if intent == "confirm":
+            # 保留待发送消息及联系人锁定，直至用户完成实际发送后明确结束本轮。
+            save_state(state)
+            return {"message": "消息已确认，联系人将保持锁定直到完成实际发送。", "intent": intent, "wechat_handoff": pending, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
         state["pending_message"] = None
         state["selected_contact"] = None
         save_state(state)
-        if intent == "cancel" and not pending:
-            return {"message": "已取消当前联系人选择，可以重新选择联系人。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到取消指令：{speech['payload']['text']}", "已清除当前联系人选择。"]}
-        message = "消息已确认，可选择交给微信发送。" if intent == "confirm" else "已取消本次发送，并清除当前联系人选择。"
-        result = {"message": message, "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
-        if intent == "confirm" and pending:
-            result["wechat_handoff"] = pending
-        return result
+        return {"message": "已取消本次发送，并清除当前联系人选择。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
 
     if intent in {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all"}:
         result = understand_schedule_query(state, intent, speech)
@@ -618,13 +642,24 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             pending = state.get("pending_message")
             if not pending:
                 raise ValueError("当前没有待确认的消息。")
+            save_state(state)
+            return {"message": "消息已确认，联系人将保持锁定直到完成实际发送。", "wechat_handoff": pending}
+
+        if action == "open_wechat_handoff":
+            pending = state.get("pending_message")
+            if not pending:
+                raise ValueError("当前没有待发送消息，请重新发起消息操作。")
+            if payload.get("contact") != pending.get("contact") or payload.get("content") != pending.get("content"):
+                raise ValueError("微信交接内容与当前确认消息不一致，已拒绝执行。")
+            return open_wechat_handoff(pending["contact"], pending["content"])
+
+        if action == "complete_message_send":
+            if not state.get("pending_message"):
+                raise ValueError("当前没有待完成的消息。")
             state["selected_contact"] = None
             state["pending_message"] = None
             save_state(state)
-            return {"message": "消息已确认，可选择交给微信发送。", "wechat_handoff": pending}
-
-        if action == "open_wechat_handoff":
-            return open_wechat_handoff(payload.get("contact"), payload.get("content"))
+            return {"message": "已结束本次发送，现可重新选择联系人。"}
 
         if action == "cancel_message":
             state["selected_contact"] = None
