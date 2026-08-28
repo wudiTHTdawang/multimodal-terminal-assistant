@@ -780,10 +780,12 @@ async function selectMusicTrackForInteraction(node, zone, confidence) {
   await lockGazeTarget(node, zone, confidence);
   musicCardSelected = true;
   node.classList.add('music-selected');
-  musicGazeTrackId = currentTrack.id;
-  // 已明确确认后，不再靠不断变化的视线重判；直到语音取消或歌曲切换。
-  musicGestureReadyAt = performance.now() + MUSIC_HEAD_GESTURE_WARMUP_MS;
-  $('#gaze-feedback').textContent = '已选中正在播放卡片。现在无论切换到哪首歌，都可使用点头/摇头或手势操作；可说“取消当前歌曲选择”解除。';
+  // 卡片选中后不再把自然转头解释成音乐偏好，只保留语音和手势操作。
+  musicGazeTrackId = undefined;
+  musicGazeGestureWindowUntil = 0;
+  clearGazeTarget();
+  headMotionHistory = [];
+  $('#gaze-feedback').textContent = '已选中正在播放卡片。现在无论切换到哪首歌，都可使用手势操作；可说“取消当前歌曲选择”解除。';
 }
 
 function showMusicGazeSuggestion(node, zone, confidence) {
@@ -1135,7 +1137,7 @@ async function enableHandGestures() {
     handGestureCandidate = undefined;
     handGestureLatched = undefined;
     handGestureSuppressHeadUntil = 0;
-    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，掌心正对镜头暂停 / 继续，横向挥动张开的手掌切下一首。');
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，张开手掌暂停 / 继续，横向挥动张开的手掌切下一首。');
   } catch (error) {
     handGesturesEnabled = false;
     setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
@@ -1143,11 +1145,8 @@ async function enableHandGestures() {
 }
 
 function canAnswerMusicFeedback() {
-  if (musicCardSelected && currentTrack && activeMode) {
-    // 刚确认歌曲时先略过几帧，避免确认动作本身被误识别为喜欢或不喜欢。
-    return performance.now() >= musicGestureReadyAt
-      && currentTrack?.id !== musicFeedbackLockedTrackId;
-  }
+  // 已明确选中播放卡片时，头部动作不再控制偏好，避免与他人交流时误触发。
+  if (musicCardSelected) return false;
   return Boolean(
     musicGazeTrackId
     && currentTrack?.id === musicGazeTrackId
@@ -1157,6 +1156,15 @@ function canAnswerMusicFeedback() {
     && activeMode
     && performance.now() >= musicGestureReadyAt
     && performance.now() < musicGazeGestureWindowUntil
+  );
+}
+
+function canProvideMusicPreference() {
+  return Boolean(
+    activeMode
+    && currentTrack
+    && currentTrack.id !== musicFeedbackLockedTrackId
+    && (musicCardSelected || canAnswerMusicFeedback())
   );
 }
 
@@ -1186,7 +1194,7 @@ async function applyHandGesture(gesture, confidence) {
       await finishMessageDecision('confirm_send', 'success', 'hand');
       return true;
     }
-    if (canAnswerMusicFeedback()) {
+    if (canProvideMusicPreference()) {
       await likeCurrentTrack('hand');
       return true;
     }
@@ -1205,7 +1213,7 @@ async function applyHandGesture(gesture, confidence) {
       await finishMessageDecision('cancel_message', 'cancel', 'hand');
       return true;
     }
-    if (canAnswerMusicFeedback()) {
+    if (canProvideMusicPreference()) {
       await dislikeCurrentTrack('hand');
       return true;
     }
@@ -1221,25 +1229,6 @@ async function applyHandGesture(gesture, confidence) {
     return true;
   }
   return false;
-}
-
-function isPalmFacingCamera(landmarks) {
-  if (!landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) return false;
-  const wrist = landmarks[0];
-  const indexMcp = landmarks[5];
-  const pinkyMcp = landmarks[17];
-  const indexVector = { x: indexMcp.x - wrist.x, y: indexMcp.y - wrist.y, z: indexMcp.z - wrist.z };
-  const pinkyVector = { x: pinkyMcp.x - wrist.x, y: pinkyMcp.y - wrist.y, z: pinkyMcp.z - wrist.z };
-  const normal = {
-    x: indexVector.y * pinkyVector.z - indexVector.z * pinkyVector.y,
-    y: indexVector.z * pinkyVector.x - indexVector.x * pinkyVector.z,
-    z: indexVector.x * pinkyVector.y - indexVector.y * pinkyVector.x,
-  };
-  const magnitude = Math.hypot(normal.x, normal.y, normal.z);
-  // 掌心面对镜头时，掌平面的法向量主要沿摄像头深度轴；取绝对值兼容左右手与镜像预览。
-  // 摄像头、手掌大小及轻微倾斜都会影响深度坐标；0.34 能容忍自然的手腕角度，
-  // 但仍要求手掌平面明显朝向镜头。
-  return magnitude > 0.0001 && Math.abs(normal.z) / magnitude >= 0.34;
 }
 
 function pointDistance(left, right) {
@@ -1287,14 +1276,7 @@ function observeHandGesture(result, now) {
   if (detectPalmWave(landmarks, now, openPalm)) {
     gesture = 'Palm_Wave';
   } else if (openPalm) {
-    if (!isPalmFacingCamera(landmarks)) {
-      // 允许掌心在两次采样间轻微转动，避免“请保持”状态被一帧噪声反复清空。
-      if (handGestureCandidate?.gesture === 'Palm_Front'
-        && now - handGestureCandidate.lastSeen <= HAND_GESTURE_CANDIDATE_GAP_MS) return;
-      handGestureCandidate = undefined;
-      setHandGestureStatus('已检测到张开手掌，请让掌心正对摄像头。');
-      return;
-    }
+    // 不再要求掌心法线精准朝向摄像头；识别到张开的手掌即可触发播放控制。
     gesture = 'Palm_Front';
   }
   const minimumConfidence = gesture === 'Palm_Front' ? 0.50 : gesture === 'Palm_Wave' ? 0 : 0.72;
@@ -1312,7 +1294,7 @@ function observeHandGesture(result, now) {
   }
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
     handGestureCandidate = { gesture, confidence, since: now, lastSeen: now };
-    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '掌心正对镜头' : '横向挥手';
+    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Thumb_Down' ? '踩' : gesture === 'Palm_Front' ? '张开手掌' : '横向挥手';
     setHandGestureStatus(`检测到${label}，请保持片刻确认。`);
     return;
   }
@@ -1600,7 +1582,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '持续注视歌曲播放卡片约 0.7 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：掌心正对镜头可暂停 / 继续，横向挥动张开的手掌可切下一首。';
+    : '持续注视歌曲播放卡片约 0.7 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：张开手掌可暂停 / 继续，横向挥动张开的手掌可切下一首。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${musicCardSelected ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
