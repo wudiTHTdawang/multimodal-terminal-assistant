@@ -1982,30 +1982,46 @@ function bindEvents() {
       input.dataset.listening = 'true';
       micBtn.classList.add('listening');
       const originalPlaceholder = input.placeholder;
-      input.placeholder = '🎤 正在倾听…';
+      input.placeholder = '🎤 正在倾听（语音直接后台处理）…';
       toast('🎤 请说话…');
 
-      recognition.onresult = (event) => {
+      recognition.onresult = async (event) => {
+        // 只取最终识别结果
         let finalTranscript = '';
-        let interimTranscript = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            finalTranscript += transcript;
-          } else {
-            interimTranscript += transcript;
+            finalTranscript += event.results[i][0].transcript;
           }
-        }
-        if (interimTranscript) {
-          input.value = interimTranscript;
         }
         if (finalTranscript) {
-          input.value = finalTranscript.trim();
-          const submitBtn = document.getElementById('prepare-message');
-          if (submitBtn) {
-            setTimeout(() => submitBtn.click(), 200);
+          //识别到文字后，不显示在输入框，直接走后端处理
+          const timestamp = Date.now();
+          try {
+            // 1. 先记录多模态事件（与模拟语音共用一套事件系统）
+            await recordBrowserEvent({
+              modality: 'speech_text',
+              timestamp_ms: timestamp,
+              confidence: 1,
+              payload: { text: finalTranscript.trim(), page: 'message', source: 'realtime_mic' }
+            });
+            // 2. 直接调用后端理解接口
+            const result = await api('understand_multimodal_command', {
+              speech_timestamp_ms: timestamp,
+              preferred_contact_id: selectedContactSource === 'manual' ? selectedContactId : undefined
+            });
+            // 3. 处理返回结果（复用现有渲染逻辑）
+            if (result.clear_message_form) {
+              if (result.intent === 'confirm') adjustGazeReliability('success');
+              if (result.intent === 'cancel') adjustGazeReliability('cancel');
+              resetMessageForm(result.message);
+            } else {
+              renderMessageUnderstanding(result);
+            }
+          } catch (error) {
+            toast(error.message);
+          } finally {
+            recognition.stop();
           }
-          recognition.stop();
         }
       };
 
@@ -2013,9 +2029,11 @@ function bindEvents() {
         input.dataset.listening = 'false';
         micBtn.classList.remove('listening');
         input.placeholder = originalPlaceholder;
-        if (!input.value.trim()) {
-          toast('未识别到有效语音，请重试。');
+        // 如果没有任何识别结果，且没有报错，给一个温和提示
+        if (!input.dataset._hasResult) {
+          // 防止重复提示，但这里不做额外处理，因为可能用户只是取消了。
         }
+        input.dataset._hasResult = false;
       };
 
       recognition.onerror = (event) => {
@@ -2030,6 +2048,7 @@ function bindEvents() {
 
       try {
         recognition.start();
+        input.dataset._hasResult = false; // 重置标记
       } catch (error) {
         input.dataset.listening = 'false';
         micBtn.classList.remove('listening');
@@ -2063,30 +2082,41 @@ function bindEvents() {
       input.dataset.listening = 'true';
       micBtn.classList.add('listening');
       const originalPlaceholder = input.placeholder;
-      input.placeholder = '🎤 正在倾听…';
+      input.placeholder = '🎤 正在倾听（语音直接后台处理）…';
       toast('🎤 请说话…');
 
-      recognition.onresult = (event) => {
+      recognition.onresult = async (event) => {
         let finalTranscript = '';
-        let interimTranscript = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            finalTranscript += transcript;
-          } else {
-            interimTranscript += transcript;
+            finalTranscript += event.results[i][0].transcript;
           }
-        }
-        if (interimTranscript) {
-          input.value = interimTranscript;
         }
         if (finalTranscript) {
-          input.value = finalTranscript.trim();
-          const submitBtn = document.getElementById('prepare-music-command');
-          if (submitBtn) {
-            setTimeout(() => submitBtn.click(), 200);
+          //不显示在输入框，直接走后端
+          const timestamp = Date.now();
+          try {
+            await recordBrowserEvent({
+              modality: 'speech_text',
+              timestamp_ms: timestamp,
+              confidence: 1,
+              payload: { text: finalTranscript.trim(), page: 'music', source: 'realtime_mic' }
+            });
+            const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+            // 处理音乐指令结果（复用现有逻辑）
+            if (result.intent === 'cancel_music_selection') {
+              clearMusicTrackSelection(result.message);
+              toast(result.message);
+            } else if (result.intent === 'next_track') {
+              await nextTrack();
+            } else {
+              toast(result.message);
+            }
+          } catch (error) {
+            toast(error.message);
+          } finally {
+            recognition.stop();
           }
-          recognition.stop();
         }
       };
 
@@ -2094,9 +2124,6 @@ function bindEvents() {
         input.dataset.listening = 'false';
         micBtn.classList.remove('listening');
         input.placeholder = originalPlaceholder;
-        if (!input.value.trim()) {
-          toast('未识别到有效语音，请重试。');
-        }
       };
 
       recognition.onerror = (event) => {
