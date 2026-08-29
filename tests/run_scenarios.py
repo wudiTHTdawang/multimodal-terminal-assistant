@@ -40,7 +40,7 @@ PAGE_TO_APP = {
 
 MODE_TRACK = {"focus": "track_010", "driving": "track_012", "entertainment": "track_024", "general": "track_031"}
 
-# expected 意图名 → 运行时可接受的意图名（空集合表示当前未实现）。
+# expected 意图名 → 运行时可接受的意图名（P4 已全部实现）。
 INTENT_EQUIV = {
     "send_message": {"send_message"},
     "clarify_contact": {"send_message"},           # 行为正确：无有效对象时返回澄清
@@ -48,20 +48,20 @@ INTENT_EQUIV = {
     "cancel_send": {"cancel"},
     "next_track": {"next_track"},
     "query_tomorrow_plan": {"query_schedule_tomorrow"},
-    "query_date_plan": set(),                       # “后天”等日期表达未实现
+    "query_date_plan": {"query_date_plan"},
     "request_memo_authorization": {"__no_authorized_memo__"},
-    "start_focus": set(),
-    "play_music": set(),
-    "like_track": set(),
-    "dislike_track": set(),
-    "clarify_or_offer_start_focus": set(),
-    "clarify_music_selection": set(),
-    "query_priority": set(),
-    "decline_reminder": set(),
+    "start_focus": {"start_focus"},
+    "play_music": {"play_music"},
+    "like_track": {"like_track"},
+    "dislike_track": {"dislike_track"},
+    "clarify_or_offer_start_focus": {"offer_start_focus"},
+    "clarify_music_selection": {"clarify_music_selection"},
+    "query_priority": {"query_priority"},
+    "decline_reminder": {"decline_reminder"},
     "confirm_reminder": {"__create_reminder_ok__"},
-    "update_reminder_preference": set(),
-    "request_edit_memo": set(),
-    "analyze_schedule_pressure": set(),
+    "update_reminder_preference": {"update_reminder_preference"},
+    "request_edit_memo": {"request_edit_memo"},
+    "analyze_schedule_pressure": {"analyze_schedule_pressure"},
 }
 
 NO_UNDERSTAND = "__no_understand__"
@@ -110,6 +110,7 @@ def run_scenario(scenario):
     last_schedule_items = None
     last_offer = None
     last_clarification = None
+    current_track_id = None
 
     try:
         for ev in scenario.get("events", []):
@@ -138,6 +139,11 @@ def run_scenario(scenario):
                     mode = value.replace("now_playing_", "") or "focus"
                     state["active_mode"] = mode if mode in {"focus", "driving", "entertainment"} else "focus"
                     state["focus_mode"] = state["active_mode"] == "focus"
+                    current_track_id = MODE_TRACK.get(state["active_mode"], "track_010")
+                # focus_music 页面隐含“专注模式上下文”
+                if value == "focus_music":
+                    state["active_mode"] = "focus"
+                    state["focus_mode"] = True
                 # offer_reminder 页面隐含“系统已给出提醒建议”
                 if value.startswith("offer_reminder") and scene == "memo" and last_offer is None:
                     try:
@@ -159,7 +165,10 @@ def run_scenario(scenario):
                     "text": value, "page": scene, "source": "simulated",
                 }, confidence))
                 try:
-                    result = app.understand_multimodal_command(state, ts)
+                    result = app.understand_multimodal_command(
+                        state, ts,
+                        current_track_id=current_track_id if scene == "music" else None,
+                    )
                     results.append({"type": "understand", "intent": result.get("intent"), "result": result})
                     last_clarification = bool(result.get("needs_clarification"))
                     if isinstance(result.get("items"), list):
@@ -201,6 +210,8 @@ def run_scenario(scenario):
         notes.append("时间窗口径差异：样例按语音前 3s，运行实现按语音前 4s（见前后端多模态接口说明.md）")
     if scenario["id"] == "B05":
         notes.append("偏好惩罚差异：运行 next_track 不惩罚当前曲目偏好（README 场景 B 设计），样例期望 -1")
+    if scenario["expected"].get("preference_delta"):
+        notes.append("偏好口径差异：样例按曲风记 delta，运行按曲目记分（like +3 / dislike -2）")
     return checks, notes
 
 
@@ -237,20 +248,49 @@ def _assert(scenario, results, state, notes, last_clarification, last_schedule_i
         actual_content = pending.get("content")
         checks.append(("content", expected["content"], actual_content, actual_content == expected["content"]))
     if expected.get("requires_confirmation"):
-        ok = bool(pending) or any(r["type"] == "confirm_send" for r in results)
-        checks.append(("requires_confirmation", True, bool(pending), ok))
+        # 消息流：出现待确认内容；提醒偏好类：要求二次确认
+        pending_ok = bool(pending) or any(r["type"] == "confirm_send" for r in results)
+        clarify_ok = bool(last_clarification)
+        checks.append(("requires_confirmation", True, pending or last_clarification, pending_ok or clarify_ok))
 
-    # 日程：memo_ids / date / 提醒 offer
+    # 日程：memo_ids / memo_id / date / 提醒 offer
     if "memo_ids" in expected:
         items = last_schedule_items or []
         actual_ids = [item.get("id") for item in items]
         checks.append(("memo_ids", expected["memo_ids"], actual_ids, sorted(actual_ids) == sorted(expected["memo_ids"])))
+    if "memo_id" in expected:
+        actual_memo = next((r["result"].get("memo_id") for r in reversed(results)
+                            if r["type"] == "understand" and r["result"].get("memo_id")), None)
+        if actual_memo is None and last_offer:
+            actual_memo = last_offer.get("memo_id")  # 提醒确认场景：offer 即对应事项
+        checks.append(("memo_id", expected["memo_id"], actual_memo, actual_memo == expected["memo_id"]))
     if "date" in expected:
         actual_date = next((r["result"].get("date") for r in reversed(results)
                             if r["type"] == "understand" and r["result"].get("date")), None)
         checks.append(("date", expected["date"], actual_date, actual_date == expected["date"]))
     if expected.get("should_offer_reminder"):
         checks.append(("should_offer_reminder", True, bool(last_offer), bool(last_offer)))
+    if expected.get("should_suggest"):
+        actual_suggest = next((r["result"].get("should_suggest") for r in reversed(results)
+                               if r["type"] == "understand" and r["result"].get("should_suggest") is not None), None)
+        checks.append(("should_suggest", True, actual_suggest, bool(actual_suggest)))
+
+    # 音乐：曲风 / 模式上下文
+    if "genre" in expected:
+        actual_genre = next((r["result"].get("recommended_genre") for r in reversed(results)
+                             if r["type"] == "understand" and r["result"].get("recommended_genre")), None)
+        checks.append(("genre", expected["genre"], actual_genre, actual_genre == expected["genre"]))
+    if "recommended_genre" in expected:
+        actual_genre = next((r["result"].get("recommended_genre") for r in reversed(results)
+                             if r["type"] == "understand" and r["result"].get("recommended_genre")), None)
+        checks.append(("recommended_genre", expected["recommended_genre"], actual_genre, actual_genre == expected["recommended_genre"]))
+    if "context" in expected:
+        actual_mode = next((r["result"].get("mode") for r in reversed(results)
+                            if r["type"] == "understand" and r["result"].get("mode")), state.get("active_mode"))
+        # 样例语境名（focus_mode 等）与运行时模式键（focus）的映射
+        context_map = {"focus_mode": "focus", "driving_mode": "driving", "entertainment_mode": "entertainment", "general_mode": "general"}
+        expected_mode = context_map.get(expected["context"], expected["context"])
+        checks.append(("context", expected["context"], actual_mode, actual_mode == expected_mode))
 
     # 动作
     exp_action = expected.get("action")
@@ -268,10 +308,22 @@ def _assert(scenario, results, state, notes, last_clarification, last_schedule_i
         fired = any(r["type"] == "create_reminder" for r in results)
         checks.append(("action", exp_action, "create_reminder" if fired else None, fired))
     elif exp_action == "skip_current_track":
-        fired = any(r["type"] == "next_track" for r in results)
-        checks.append(("action", exp_action, "next_track" if fired else None, fired))
+        fired = any(r["type"] == "next_track" for r in results) or any(
+            r["intent"] == "dislike_track" and bool(r["result"].get("track")) for r in results
+        )
+        checks.append(("action", exp_action, "skip" if fired else None, fired))
+    elif exp_action == "show_focus_music_options":
+        fired = any(r["intent"] == "start_focus" and bool(r["result"].get("track")) for r in results)
+        checks.append(("action", exp_action, "start_focus" if fired else None, fired))
+    elif exp_action == "do_not_create_current_reminder":
+        declined = any(r["intent"] == "decline_reminder" for r in results)
+        created = any(r["type"] == "create_reminder" for r in results)
+        checks.append(("action", exp_action, "decline" if declined and not created else None, declined and not created))
+    elif exp_action == "ask_for_edit_details_and_confirmation":
+        fired = any(r["intent"] == "request_edit_memo" and bool(r["result"].get("needs_clarification")) for r in results)
+        checks.append(("action", exp_action, "request_edit_memo" if fired else None, fired))
     elif exp_action:
-        # 其余动作（show_focus_music_options 等）当前实现不触发，记为未校验
+        # 其余动作当前实现不触发，记为未校验
         checks.append(("action", exp_action, "not-asserted", False))
 
     return checks

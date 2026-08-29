@@ -682,7 +682,10 @@ async function submitSimulatedMusicCommand() {
       confidence: 1,
       payload: { text, page: 'music', source: 'simulated' },
     });
-    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    const result = await api('understand_multimodal_command', {
+      speech_timestamp_ms: timestamp,
+      current_track_id: currentTrack?.id,
+    });
     $('#music-command').value = '';
     if (fusionSummary(result)) $('#gaze-feedback').textContent = fusionSummary(result);
     if (result.intent === 'cancel_music_selection') {
@@ -692,6 +695,39 @@ async function submitSimulatedMusicCommand() {
     }
     if (result.intent === 'next_track') {
       await nextTrack();
+      return;
+    }
+    // 后端已切换模式/播放/切歌：应用返回的曲目、模式与偏好歌单。
+    if (result.intent === 'start_focus' || result.intent === 'play_music' || result.intent === 'dislike_track') {
+      if (result.mode) {
+        activeMode = result.mode;
+        updateModeStatus();
+      }
+      if (result.track) {
+        stopDemoPlayback();
+        currentTrack = result.track;
+        currentRecommendationReason = result.recommendation_reason || '';
+        currentPreferencePlaylist = result.preference_playlist || [];
+        musicGazeTrackId = undefined;
+        musicFeedbackLockedTrackId = undefined;
+        musicCardSelected = false;
+        switchArmed = false;
+        $('#mode-decision').innerHTML = '';
+        renderNowPlaying(result.message);
+      } else {
+        toast(result.message);
+      }
+      return;
+    }
+    if (result.intent === 'like_track') {
+      if (result.preference_playlist) currentPreferencePlaylist = result.preference_playlist;
+      if (currentTrack) {
+        musicFeedbackLockedTrackId = currentTrack.id;
+        musicGazeTrackId = undefined;
+        renderNowPlaying(result.message);
+      } else {
+        toast(result.message);
+      }
       return;
     }
     toast(result.message);
@@ -2040,6 +2076,11 @@ const HISTORY_ACTION_LABELS = {
   next_track: '切换下一首',
   advance_track: '自动切歌',
   stop_mode: '停止音乐模式',
+  play_music: '播放歌曲',
+  query_priority: '查询优先级事项',
+  decline_reminder: '取消提醒',
+  update_reminder_preference: '设置提醒偏好',
+  request_edit_memo: '请求修改备忘录',
 };
 
 function resolveTargetName(page, targetId) {

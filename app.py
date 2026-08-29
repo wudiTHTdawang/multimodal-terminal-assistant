@@ -518,7 +518,10 @@ def find_contact_by_name(name):
 
 
 def parse_simulated_speech(text):
-    """返回 (intent, content, spoken_contact_name)；spoken_contact_name 可为空。"""
+    """返回 (intent, content, spoken_contact_name)；spoken_contact_name 可为空。
+
+    intent 覆盖消息、音乐、日程三类语音指令；content 用于发送正文或曲风名。
+    """
     normalized = re.sub(r"\s+", "", text)
     if normalized in {"取消当前歌曲选择", "取消歌曲选择", "取消音乐选择", "不选这首", "不操作这首"}:
         return "cancel_music_selection", "", ""
@@ -531,13 +534,42 @@ def parse_simulated_speech(text):
     # 显式否定优先于发送指令：不要/别/不 + 给X + 发消息 → 取消（安全原则）
     if re.search(r"(?:不要|别|不)(?:给他|给她|给它|给[\u4e00-\u9fa5A-Za-z0-9]{1,6})?(?:发消息|发送消息|发信息|发送信息)", normalized):
         return "cancel", "", ""
+    # 日程：提醒语音
+    if normalized in {"不要提醒", "不用提醒", "不提醒", "不需要提醒"}:
+        return "decline_reminder", "", ""
+    if "以后" in normalized and "不要提醒" in normalized:
+        return "update_reminder_preference", "", ""
+    if "修改" in normalized:
+        return "request_edit_memo", "", ""
+    # 日程：优先级与日期查询
+    if "优先" in normalized or "重要" in normalized:
+        return "query_priority", "", ""
     if "安排" in normalized or "日程" in normalized:
+        if "太赶" in normalized or "压力" in normalized or "来得及" in normalized:
+            return "analyze_schedule_pressure", "", ""
+        if "后天" in normalized:
+            return "query_date_plan", "", ""
         if "明天" in normalized:
             return "query_schedule_tomorrow", "", ""
         if "今天" in normalized:
             return "query_schedule_today", "", ""
         if any(word in normalized for word in ("全部", "所有", "最近")):
             return "query_schedule_all", "", ""
+    # 音乐：喜欢 / 不喜欢
+    if normalized in {"我喜欢这首", "我喜欢这首歌", "喜欢这首", "喜欢这首歌", "喜欢这个", "喜欢"}:
+        return "like_track", "", ""
+    if normalized in {"这首不喜欢", "这首歌不喜欢", "不喜欢这首", "不喜欢这首歌", "不喜欢这个", "这个不喜欢", "不喜欢"}:
+        return "dislike_track", "", ""
+    # 音乐：模式启动与播放
+    if normalized in {"我准备学习", "开始专注", "开始学习", "进入专注模式", "我要学习"}:
+        return "start_focus", "", ""
+    if normalized == "播放学习音乐":
+        return "offer_start_focus", "", ""
+    if normalized in {"播放这个", "播放这首", "播放"}:
+        return "play_music", "", ""
+    match = re.search(r"播放([\u4e00-\u9fa5A-Za-z0-9-]{1,12})", normalized)
+    if match:
+        return "play_music", match.group(1), ""
     # “给X发消息，正文”：提取联系人名（“他/她/它”不是联系人名，由视线/手动选择兜底）
     match = re.search(r"给([\u4e00-\u9fa5A-Za-z0-9]{1,6})(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match:
@@ -550,6 +582,20 @@ def parse_simulated_speech(text):
     return "unknown", "", ""
 
 
+def normalize_genre(value):
+    """把语音/注视目标中的曲风表述归一化到曲库 genre 值；无法识别时返回原样小写。"""
+    if not value:
+        return None
+    cleaned = re.sub(r"[\s\-_]", "", str(value)).lower()
+    if cleaned.startswith("genre"):
+        cleaned = cleaned[5:]
+    aliases = {
+        "lofi": "lofi", "轻音乐": "light_music", "纯音乐": "pure_music",
+        "古典": "classical", "流行": "pop", "爵士": "jazz", "摇滚": "rock", "电子": "electronic",
+    }
+    return aliases.get(cleaned, cleaned)
+
+
 def visible_target_ids(events, page, timestamp_ms):
     return {
         target.get("target_id")
@@ -559,6 +605,11 @@ def visible_target_ids(events, page, timestamp_ms):
         and abs(context["timestamp_ms"] - timestamp_ms) <= 5_000
         for target in context["payload"].get("visible_targets", [])
     }
+
+
+# 视线对齐时间窗（语音前 3 秒至语音后 1 秒），与 tests/scenarios.json 验收口径一致。
+GAZE_ALIGNMENT_BEFORE_MS = 3_000
+GAZE_ALIGNMENT_AFTER_MS = 1_000
 
 
 def summarize_multimodal_alignment(events, page, anchor_timestamp_ms, speech_intent=None):
@@ -573,7 +624,7 @@ def summarize_multimodal_alignment(events, page, anchor_timestamp_ms, speech_int
         item for item in events
         if item["modality"] == "gaze"
         and item["payload"].get("page") == page
-        and anchor_timestamp_ms - 4_000 <= item["timestamp_ms"] <= anchor_timestamp_ms + 1_000
+        and anchor_timestamp_ms - GAZE_ALIGNMENT_BEFORE_MS <= item["timestamp_ms"] <= anchor_timestamp_ms + GAZE_ALIGNMENT_AFTER_MS
     ]
     decisions = [
         item for item in events
@@ -587,7 +638,7 @@ def summarize_multimodal_alignment(events, page, anchor_timestamp_ms, speech_int
     summary = {
         "page": page,
         "anchor_timestamp_ms": anchor_timestamp_ms,
-        "windows_ms": {"screen_context": 5_000, "gaze_before": 4_000, "decision_before": 2_000},
+        "windows_ms": {"screen_context": 5_000, "gaze_before": GAZE_ALIGNMENT_BEFORE_MS, "decision_before": 2_000},
         "modalities": ["speech_text"] + (["screen_context"] if contexts else []) + (["gaze"] if best_gaze else []) + sorted({item["modality"] for item in decisions}),
         "screen_context_available": bool(contexts),
         "gaze_target_id": best_gaze["payload"].get("target_id") if best_gaze else None,
@@ -606,7 +657,7 @@ def summarize_multimodal_alignment(events, page, anchor_timestamp_ms, speech_int
     return summary
 
 
-def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id=None):
+def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id=None, current_track_id=None):
     events = recent_multimodal_events()
     speech_events = [
         item for item in events
@@ -621,6 +672,8 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         return {"message": "已取消当前歌曲选择；你可以重新注视并确认另一首歌曲。", "intent": intent, "explanation": [f"识别到音乐取消指令：{speech['payload']['text']}"]}
     if intent == "next_track":
         return {"message": "已识别切换下一首指令。", "intent": intent, "explanation": [f"识别到音乐指令：{speech['payload']['text']}"]}
+    if intent in {"like_track", "dislike_track", "start_focus", "play_music", "offer_start_focus"}:
+        return understand_music_command(state, intent, content, speech, events, current_track_id)
 
     if intent in {"confirm", "cancel"}:
         pending = state.get("pending_message")
@@ -650,7 +703,11 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         save_state(state)
         return {"message": "已取消本次发送，并清除当前联系人选择。", "intent": intent, "clear_message_form": True, "explanation": [f"识别到确认词：{speech['payload']['text']}"]}
 
-    if intent in {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all"}:
+    if intent in {
+        "query_schedule_today", "query_schedule_tomorrow", "query_schedule_all",
+        "query_priority", "query_date_plan", "analyze_schedule_pressure",
+        "decline_reminder", "update_reminder_preference", "request_edit_memo",
+    }:
         result = understand_schedule_query(state, intent, speech)
         result["intent"] = intent
         result["explanation"] = [f"识别到模拟语音：{speech['payload']['text']}", "仅读取用户已授权的本地备忘录，不修改日程完成状态。"]
@@ -668,7 +725,7 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         if item["modality"] == "gaze"
         and item["payload"].get("page") == "message"
         and item["payload"].get("target_type") == "contact"
-        and speech_timestamp_ms - 4_000 <= item["timestamp_ms"] <= speech_timestamp_ms + 1_000
+        and speech_timestamp_ms - GAZE_ALIGNMENT_BEFORE_MS <= item["timestamp_ms"] <= speech_timestamp_ms + GAZE_ALIGNMENT_AFTER_MS
     ]
     gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
     # 安全原则：置信度不足的视线不作为对象依据，改走澄清，不直接采用。
@@ -733,6 +790,16 @@ SPEECH_HISTORY_ACTIONS = {
     "query_schedule_all": "query_schedule",
     "next_track": "next_track",
     "cancel_music_selection": "cancel_music_selection",
+    "like_track": "like_track",
+    "dislike_track": "dislike_track",
+    "start_focus": "start_mode",
+    "play_music": "play_music",
+    "query_priority": "query_schedule",
+    "query_date_plan": "query_schedule",
+    "analyze_schedule_pressure": "query_schedule",
+    "decline_reminder": "decline_reminder",
+    "update_reminder_preference": "update_reminder_preference",
+    "request_edit_memo": "request_edit_memo",
 }
 
 
@@ -752,7 +819,7 @@ def record_speech_operation(state, result, intent, page):
         })
 
 
-def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None):
+def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_id=None, current_track_id=None):
     """所有文本指令共用同一套时间对齐摘要，再进入对应场景的意图处理。"""
     events = recent_multimodal_events()
     speech_events = [
@@ -763,7 +830,7 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
         raise ValueError("未找到对应的模拟语音事件，请重新提交。")
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
     intent, _, _ = parse_simulated_speech(str(speech["payload"].get("text", "")))
-    result = understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id)
+    result = understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id, current_track_id)
     fusion = summarize_multimodal_alignment(events, speech["payload"].get("page", "unknown"), speech_timestamp_ms, intent)
     result["fusion"] = fusion
     result.setdefault("explanation", []).append(f"多模态综合判断：{fusion['summary']}")
@@ -805,7 +872,8 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
 
 DEMO_COMMON_TRACKS = {
     "general": ["track_031", "track_024", "track_010", "track_026", "track_012"],
-    "focus": ["track_010", "track_015", "track_018", "track_022", "track_004"],
+    # 冷启动第一首用轻音乐（贴合“专注”场景的演示预期），再穿插其他曲风。
+    "focus": ["track_018", "track_003", "track_010", "track_015", "track_022"],
     "driving": ["track_012", "track_028", "track_030", "track_007", "track_008"],
     "entertainment": ["track_024", "track_026", "track_013", "track_025", "track_027"],
 }
@@ -993,7 +1061,171 @@ def understand_schedule_query(state, intent, speech):
     if intent == "query_schedule_tomorrow":
         date = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
         return schedule_query_result(state, date.strftime("%Y-%m-%d"), f"明天（{date:%Y-%m-%d}）日程")
+    if intent == "query_date_plan":  # 后天
+        date = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=2))
+        return schedule_query_result(state, date.strftime("%Y-%m-%d"), f"后天（{date:%Y-%m-%d}）日程")
+    if intent == "query_priority":
+        tomorrow = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+        items = [
+            item for item in schedule_items(state)
+            if item.get("date") == tomorrow_str and item.get("priority") == "high"
+        ]
+        return {
+            "message": "已整理明天的高优先级事项。",
+            "title": "明天高优先级事项",
+            "items": items,
+            "total": len(items),
+            "memo_id": items[0]["id"] if items else None,
+        }
+    if intent == "analyze_schedule_pressure":
+        tomorrow = (reference.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+        highs = [
+            item for item in schedule_items(state)
+            if item.get("date") == tomorrow_str and item.get("priority") == "high" and not item.get("is_completed")
+        ]
+        pair = None
+        for index in range(len(highs) - 1):
+            try:
+                first = datetime.fromisoformat(f"{highs[index]['date']} {highs[index]['time']}")
+                second = datetime.fromisoformat(f"{highs[index + 1]['date']} {highs[index + 1]['time']}")
+                gap_hours = (second - first).total_seconds() / 3600
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 < gap_hours < 5:
+                pair = (highs[index], highs[index + 1], gap_hours)
+                break
+        if pair:
+            first_item, second_item, gap = pair
+            message = (
+                f"「{first_item['title']}」{first_item['time']} 到「{second_item['title']}」"
+                f"{second_item['time']} 仅间隔 {gap:.0f} 小时，建议提前完成准备工作。"
+            )
+        else:
+            message = "明天的安排时间充裕，没有明显的时间压力。"
+        return {
+            "message": message,
+            "title": "明天日程压力分析",
+            "items": highs,
+            "total": len(highs),
+            "suggestion": message,
+            "should_suggest": pair is not None,
+        }
+    if intent == "decline_reminder":
+        return {"message": "已取消本次提醒；不会因此修改长期偏好。", "intent": intent}
+    if intent == "update_reminder_preference":
+        return {
+            "message": "确定以后同类事项都不要提醒吗？确认后同类事项将不再自动建议提醒。",
+            "intent": intent, "needs_clarification": True,
+        }
+    if intent == "request_edit_memo":
+        return {
+            "message": "修改备忘录需要明确确认。请告诉我具体事项与新的时间，确认后我才会修改本地副本。",
+            "intent": intent, "needs_clarification": True,
+        }
     return schedule_query_result(state, title="全部已授权日程")
+
+
+def understand_music_command(state, intent, content, speech, events, current_track_id=None):
+    """音乐页语音指令：模式启动、播放、喜欢/不喜欢；规则决定执行，LLM 只做解释。"""
+    if intent == "offer_start_focus":
+        return {
+            "message": "当前未启用专注模式。需要我为你开启专注模式吗？",
+            "intent": intent, "needs_clarification": True,
+            "explanation": ["识别到学习/专注诉求，但音乐模式尚未启用。"],
+        }
+    if intent == "start_focus":
+        state["active_mode"] = "focus"
+        state["focus_mode"] = True
+        track, reason = recommend_track(state, "focus")
+        save_state(state)
+        return {
+            "message": f"已为你开启专注模式，正在播放：{track['title']}。",
+            "intent": intent, "mode": "focus", "track": track,
+            "recommendation_reason": reason, "recommended_genre": track.get("genre"),
+            "preference_playlist": mode_preference_playlist(state, "focus"),
+        }
+    if intent == "play_music":
+        return _resolve_play_music(state, content, events, speech)
+    if intent in {"like_track", "dislike_track"}:
+        mode = state["active_mode"] or "general"
+        if not current_track_id or current_track_id not in tracks_by_id():
+            return {
+                "message": "当前没有正在播放的歌曲，请先播放一首歌。",
+                "intent": intent, "needs_clarification": True,
+                "explanation": ["缺少当前播放曲目，无法记录偏好。"],
+            }
+        if intent == "like_track":
+            adjustment = record_track_preference(state, mode, current_track_id, 3, add_to_playlist=True)
+            message = "已加入当前模式偏好歌单，当前歌曲继续播放。"
+        else:
+            adjustment = record_track_preference(state, mode, current_track_id, -2)
+            track, reason = recommend_track(state, mode, current_track_id)
+            message = f"已降低这首歌的偏好值，正在播放：{track['title']}。"
+        save_state(state)
+        result = {"message": message, "intent": intent, "adjustment": adjustment,
+                  "preference_playlist": mode_preference_playlist(state, mode)}
+        if intent == "dislike_track":
+            result.update({"track": track, "recommendation_reason": reason})
+        return result
+    return {"message": "暂未理解该音乐指令。", "intent": "unknown", "explanation": []}
+
+
+def _resolve_play_music(state, content, events, speech):
+    """“播放X/播放这个”：语音曲风优先，其次注视的曲风卡片；置信度不足时澄清。"""
+    anchor = speech["timestamp_ms"]
+    genre = normalize_genre(content) if content else None
+    gaze = None
+    if not genre:
+        gazes = [
+            item for item in events
+            if item["modality"] == "gaze"
+            and item["payload"].get("page") == "music"
+            and anchor - GAZE_ALIGNMENT_BEFORE_MS <= item["timestamp_ms"] <= anchor + GAZE_ALIGNMENT_AFTER_MS
+        ]
+        gaze = max(gazes, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
+        if gaze and gaze["confidence"] < 0.55:
+            return {
+                "message": "注视置信度不足，请重新注视想播放的内容，或直接说出曲风。",
+                "intent": "clarify_music_selection", "needs_clarification": True,
+                "explanation": ["视线置信度不足，按安全原则不直接采用。"],
+            }
+        if gaze:
+            genre = normalize_genre(gaze["payload"].get("target_id"))
+    if not genre:
+        return {
+            "message": "请说出想播放的曲风，或注视对应的歌曲/曲风卡片。",
+            "intent": "play_music", "needs_clarification": True,
+            "explanation": ["缺少播放对象。"],
+        }
+    track_index = tracks_by_id()
+    known_genres = {track.get("genre") for track in track_index.values()}
+    if genre not in known_genres:
+        return {
+            "message": f"本地曲库中没有“{genre}”曲风，可尝试 Lo-fi、轻音乐、纯音乐、古典、流行、爵士、摇滚、电子。",
+            "intent": "play_music", "needs_clarification": True,
+            "explanation": [f"曲风 {genre} 不在本地曲库。"],
+        }
+    mode = state.get("active_mode") or "general"
+    candidates = [
+        track for track in track_index.values()
+        if track.get("genre") == genre and (mode == "general" or mode in track.get("moods", []))
+    ]
+    if not candidates:
+        candidates = [track for track in track_index.values() if track.get("genre") == genre]
+    track = candidates[0]
+    if mode == "general":
+        state["active_mode"] = None
+        state["focus_mode"] = False
+    save_state(state)
+    return {
+        "message": f"正在播放：{track['title']}（{track.get('genre')}）。",
+        "intent": "play_music", "mode": mode, "track": track,
+        "recommendation_reason": f"曲风匹配：{track.get('genre')}",
+        "recommended_genre": track.get("genre"),
+        "preference_playlist": mode_preference_playlist(state, mode),
+    }
 
 
 class AssistantHandler(SimpleHTTPRequestHandler):
@@ -1138,7 +1370,11 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             timestamp_ms = payload.get("speech_timestamp_ms")
             if not isinstance(timestamp_ms, int):
                 raise ValueError("speech_timestamp_ms 必须是语音事件的毫秒时间戳。")
-            return understand_multimodal_command(state, timestamp_ms, payload.get("preferred_contact_id"))
+            return understand_multimodal_command(
+                state, timestamp_ms,
+                preferred_contact_id=payload.get("preferred_contact_id"),
+                current_track_id=payload.get("current_track_id"),
+            )
 
         if action == "select_contact":
             contact_id = str(payload["contact_id"])
