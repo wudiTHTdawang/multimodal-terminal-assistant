@@ -60,6 +60,10 @@ let playbackPaused = false;
 let pausedPlaybackRemainingMs = 0;
 let memoAuthorizationMode = 'merge';
 let authorizedSources = [];
+let activeProfileId;
+let localLatencySamples = [];
+// 后端手势画像中的最小触发阈值；每次头部确认/撤销后更新，用于过滤低于该幅度的自然晃动。
+let adaptiveHeadMinStrength = 0;
 
 const DEMO_TRACK_DURATION_SECONDS = 18;
 const MUSIC_GAZE_GESTURE_WINDOW_MS = 3200;
@@ -89,11 +93,8 @@ const FACE_TASK_VERSION = '1.0.1';
 const FACE_MODEL_URL = '/models/face_landmarker.task';
 const HAND_GESTURE_MODEL_URL = '/models/gesture_recognizer.task';
 const FACE_BUNDLE_URL = '/vendor/mediapipe/vision_bundle.mjs';
-// WASM 体积较大，保留两个等价来源；一个无法访问时会自动尝试另一个。
-const FACE_WASM_URLS = [
-  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
-  `https://unpkg.com/@mediapipe/tasks-vision@${FACE_TASK_VERSION}/wasm`,
-];
+// 视觉运行时、模型和 WASM 全部随项目本地发布；断网时也可完成端侧推理。
+const FACE_WASM_URLS = ['/vendor/mediapipe/wasm'];
 const GAZE_CALIBRATION_STORAGE_KEY = 'zhiji.gaze-calibration.v4';
 const EYE_LANDMARKS = [33, 133, 159, 145, 160, 158, 153, 144, 362, 263, 386, 374, 385, 387, 373, 380, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
 const CALIBRATION_POINTS = [
@@ -105,14 +106,29 @@ const CALIBRATION_POINTS = [
 const $ = (selector) => document.querySelector(selector);
 
 async function api(action, extra = {}) {
+  const startedAt = performance.now();
   const response = await fetch('/api/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, ...extra }),
   });
   const payload = await response.json();
+  const elapsedMs = performance.now() - startedAt;
+  if (action !== 'record_multimodal_event' && action !== 'get_recent_multimodal_events') {
+    localLatencySamples.push({ action, elapsedMs });
+    localLatencySamples = localLatencySamples.slice(-100);
+    updateLatencySummary();
+  }
   if (!payload.ok) throw new Error(payload.error);
   return payload.result;
+}
+
+function updateLatencySummary() {
+  const node = $('#latency-summary');
+  if (!node || !localLatencySamples.length) return;
+  const values = localLatencySamples.map((item) => item.elapsedMs).sort((left, right) => left - right);
+  const percentile = (ratio) => values[Math.min(values.length - 1, Math.ceil(values.length * ratio) - 1)];
+  node.textContent = `本页面本轮本地接口延迟：${values.length} 次，P50 ${percentile(0.50).toFixed(0)} ms，P95 ${percentile(0.95).toFixed(0)} ms。该指标不含摄像头采样等待和人工输入时间。`;
 }
 
 function toast(message) {
@@ -538,13 +554,21 @@ function recordScreenContext() {
   });
 }
 
-async function recordHeadDecision(decision, purpose, page = 'message') {
-  await recordBrowserEvent({
+async function recordHeadDecision(decision, purpose, page = 'message', motionStrength) {
+  const payload = { page, decision, gesture: decision === 'confirm' ? 'nod' : 'shake', purpose };
+  // 把归一化的点头/摇头幅度一并上报，供后端手势自适应画像学习。
+  if (typeof motionStrength === 'number' && motionStrength > 0 && motionStrength < 1) {
+    payload.motion_strength = Number(motionStrength.toFixed(4));
+  }
+  const result = await recordBrowserEvent({
     modality: 'head_gesture',
     timestamp_ms: Date.now(),
     confidence: 0.72,
-    payload: { page, decision, gesture: decision === 'confirm' ? 'nod' : 'shake', purpose },
+    payload,
   });
+  // 后端返回的最新画像（含自适应阈值）驱动检测下限，形成“学习→调整→再检测”闭环。
+  const updatedThreshold = result?.gesture_profile?.head_min_strength;
+  if (typeof updatedThreshold === 'number') adaptiveHeadMinStrength = updatedThreshold;
 }
 
 async function recordHandGesture(decision, gesture, purpose, page = 'message', confidence = 0.75) {
@@ -556,11 +580,11 @@ async function recordHandGesture(decision, gesture, purpose, page = 'message', c
   });
 }
 
-async function finishMessageDecision(action, outcome, source = 'button') {
+async function finishMessageDecision(action, outcome, source = 'button', motionStrength) {
   if (!pendingMessage || messageDecisionInProgress) return;
   messageDecisionInProgress = true;
   try {
-    if (source === 'head') await recordHeadDecision(outcome === 'success' ? 'confirm' : 'reject', 'message_confirmation');
+    if (source === 'head') await recordHeadDecision(outcome === 'success' ? 'confirm' : 'reject', 'message_confirmation', 'message', motionStrength);
     if (source === 'hand') await recordHandGesture(outcome === 'success' ? 'confirm' : 'reject', outcome === 'success' ? 'Thumb_Up' : 'Thumb_Down', 'message_confirmation');
     const result = await api(action, pendingMessage);
     adjustGazeReliability(outcome);
@@ -576,13 +600,17 @@ function renderMessageUnderstanding(result) {
   const explanation = result.explanation?.length
     ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
   const actions = result.pending
-    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
+    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">确认后将仅在本地模拟消息应用中展示发送成功；也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
   $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
   if (result.pending) {
     pendingMessage = result.pending;
     $('#confirm-send').onclick = () => finishMessageDecision('confirm_send', 'success');
     $('#cancel-send').onclick = () => finishMessageDecision('cancel_message', 'cancel');
   }
+}
+
+function fusionSummary(result) {
+  return result?.fusion?.summary ? `多模态综合判断：${result.fusion.summary}` : '';
 }
 
 async function submitSimulatedSpeech() {
@@ -654,8 +682,12 @@ async function submitSimulatedMusicCommand() {
       confidence: 1,
       payload: { text, page: 'music', source: 'simulated' },
     });
-    const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    const result = await api('understand_multimodal_command', {
+      speech_timestamp_ms: timestamp,
+      current_track_id: currentTrack?.id,
+    });
     $('#music-command').value = '';
+    if (fusionSummary(result)) $('#gaze-feedback').textContent = fusionSummary(result);
     if (result.intent === 'cancel_music_selection') {
       clearMusicTrackSelection(result.message);
       toast(result.message);
@@ -663,6 +695,39 @@ async function submitSimulatedMusicCommand() {
     }
     if (result.intent === 'next_track') {
       await nextTrack();
+      return;
+    }
+    // 后端已切换模式/播放/切歌：应用返回的曲目、模式与偏好歌单。
+    if (result.intent === 'start_focus' || result.intent === 'play_music' || result.intent === 'dislike_track') {
+      if (result.mode) {
+        activeMode = result.mode;
+        updateModeStatus();
+      }
+      if (result.track) {
+        stopDemoPlayback();
+        currentTrack = result.track;
+        currentRecommendationReason = result.recommendation_reason || '';
+        currentPreferencePlaylist = result.preference_playlist || [];
+        musicGazeTrackId = undefined;
+        musicFeedbackLockedTrackId = undefined;
+        musicCardSelected = false;
+        switchArmed = false;
+        $('#mode-decision').innerHTML = '';
+        renderNowPlaying(result.message);
+      } else {
+        toast(result.message);
+      }
+      return;
+    }
+    if (result.intent === 'like_track') {
+      if (result.preference_playlist) currentPreferencePlaylist = result.preference_playlist;
+      if (currentTrack) {
+        musicFeedbackLockedTrackId = currentTrack.id;
+        musicGazeTrackId = undefined;
+        renderNowPlaying(result.message);
+      } else {
+        toast(result.message);
+      }
       return;
     }
     toast(result.message);
@@ -703,7 +768,7 @@ async function lockGazeTarget(node, zone, confidence) {
   lastLockedGaze = { zone, target_id: metadata.target_id };
   if (isContact) {
     try {
-      await api('select_contact', { contact_id: node.dataset.id });
+      await api('select_contact', { contact_id: node.dataset.id, input_modality: 'gaze' });
       document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
       node.classList.add('selected');
       $('#message-result').innerHTML = '';
@@ -941,6 +1006,8 @@ function observeHeadGesture(landmarks) {
 
   const horizontalRange = Math.max(...headMotionHistory.map((sample) => sample.yaw)) - Math.min(...headMotionHistory.map((sample) => sample.yaw));
   const verticalRange = Math.max(...headMotionHistory.map((sample) => sample.pitch)) - Math.min(...headMotionHistory.map((sample) => sample.pitch));
+  // 归一化点头/摇头幅度：范围已除以双眼间距，映射到 (0,1) 供后端手势自适应画像学习。
+  const motionStrength = Math.min(0.95, Math.max(0.05, Math.max(horizontalRange, verticalRange) * 2.0));
   // 用“前半段到后半段的方向性变化”识别动作，而非只看抖动范围。
   // 摄像头静止噪声会有小范围波动，但不会持续朝一个方向移动。
   const half = Math.floor(headMotionHistory.length / 2);
@@ -956,11 +1023,13 @@ function observeHeadGesture(landmarks) {
   const horizontalThreshold = gentleMusicGesture ? 0.10 : 0.06;
   const dominance = gentleMusicGesture ? 1.5 : 1.3;
   const rangeMultiplier = gentleMusicGesture ? 1.7 : 1.45;
+  // 自适应下限：撤销过某幅度后，后续动作需比它更明显才触发，避免把自然晃动当成指令。
+  const adaptiveFloor = adaptiveHeadMinStrength || 0;
   const verticalGesture = Math.abs(directionalPitch) > verticalThreshold
-    && verticalRange > verticalThreshold * rangeMultiplier
+    && verticalRange > Math.max(verticalThreshold * rangeMultiplier, adaptiveFloor)
     && Math.abs(directionalPitch) > Math.abs(directionalYaw) * dominance;
   const horizontalGesture = Math.abs(directionalYaw) > horizontalThreshold
-    && horizontalRange > horizontalThreshold * rangeMultiplier
+    && horizontalRange > Math.max(horizontalThreshold * rangeMultiplier, adaptiveFloor)
     && Math.abs(directionalYaw) > Math.abs(directionalPitch) * dominance;
   if (verticalGesture) {
     lastHeadGestureAt = Date.now();
@@ -968,28 +1037,32 @@ function observeHeadGesture(landmarks) {
       const suggestion = pendingGazeSuggestion;
       clearGazeSuggestion();
       void (async () => {
-        await recordHeadDecision('confirm', 'contact_selection');
+        await recordHeadDecision('confirm', 'contact_selection', 'message', motionStrength);
         await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
       })();
     } else if (pendingMusicGazeSuggestion) {
       const suggestion = pendingMusicGazeSuggestion;
-      void selectMusicTrackForInteraction(suggestion.node, suggestion.zone, suggestion.confidence);
+      void (async () => {
+        await recordHeadDecision('confirm', 'music_selection', 'music', motionStrength);
+        await selectMusicTrackForInteraction(suggestion.node, suggestion.zone, suggestion.confidence);
+      })();
     } else if (pendingMessage) {
-      void finishMessageDecision('confirm_send', 'success', 'head');
+      void finishMessageDecision('confirm_send', 'success', 'head', motionStrength);
     } else {
-      void likeCurrentTrack('head');
+      void likeCurrentTrack('head', motionStrength);
     }
   } else if (horizontalGesture) {
     lastHeadGestureAt = Date.now();
     if (pendingGazeSuggestion) {
-      void recordHeadDecision('reject', 'contact_selection');
+      void recordHeadDecision('reject', 'contact_selection', 'message', motionStrength);
       rejectGazeSuggestion();
     } else if (pendingMusicGazeSuggestion) {
+      void recordHeadDecision('reject', 'music_selection', 'music', motionStrength);
       dismissMusicGazeSuggestion('好的，暂不选中这首歌。');
     } else if (pendingMessage) {
-      void finishMessageDecision('cancel_message', 'cancel', 'head');
+      void finishMessageDecision('cancel_message', 'cancel', 'head', motionStrength);
     } else {
-      void dislikeCurrentTrack('head');
+      void dislikeCurrentTrack('head', motionStrength);
     }
   }
 }
@@ -1093,7 +1166,7 @@ async function initializeFaceLandmarker() {
       lastError = error;
     }
   }
-  throw new Error(`视觉运行时无法加载，请检查网络是否可访问 jsDelivr 或 unpkg。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
+  throw new Error(`本地视觉运行时无法加载，请检查 web/vendor/mediapipe/wasm 是否完整。${lastError?.message ? ` 原因：${lastError.message}` : ''}`);
 }
 
 function setHandGestureStatus(message) {
@@ -1141,7 +1214,7 @@ async function enableHandGestures() {
     handGestureSuppressHeadUntil = 0;
     stablePalmPose = undefined;
     stablePalmPoseAt = 0;
-    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，手掌开合暂停 / 继续，横向或斜向挥动张开的手掌切下一首。');
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，手掌开合暂停 / 继续，横向或斜向挥动张开的手掌切下一首（挥手无需先选中播放卡片）。');
   } catch (error) {
     handGesturesEnabled = false;
     setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
@@ -1168,7 +1241,8 @@ function canProvideMusicPreference() {
     activeMode
     && currentTrack
     && currentTrack.id !== musicFeedbackLockedTrackId
-    && (musicCardSelected || canAnswerMusicFeedback())
+    // 音乐手势必须以“已确认选中整个播放卡片”为前提，不能仅凭短暂注视触发。
+    && musicCardSelected
   );
 }
 
@@ -1176,8 +1250,14 @@ function canControlSelectedMusicTrack() {
   return Boolean(
     activeMode
     && currentTrack
-    && (musicCardSelected || canAnswerMusicFeedback())
+    && musicCardSelected
   );
+}
+
+function canWaveSkip() {
+  // 挥手切歌：大幅横向/斜向运动本身就是明确意图，只需处于音乐模式且有当前歌曲即可触发，
+  // 不再要求先注视选中播放卡片，符合“听歌时挥手切歌”的真实使用场景。
+  return Boolean(activeMode && currentTrack);
 }
 
 async function applyHandGesture(gesture, confidence) {
@@ -1222,14 +1302,14 @@ async function applyHandGesture(gesture, confidence) {
       return true;
     }
   }
-  if (gesture === 'Palm_Toggle' && activeMode && currentTrack) {
+  if (gesture === 'Palm_Toggle' && canControlSelectedMusicTrack()) {
     await recordHandGesture('toggle_playback', 'Palm_Toggle', 'music_playback', 'music', confidence);
     toggleDemoPlayback();
     return true;
   }
-  if (gesture === 'Palm_Wave' && canControlSelectedMusicTrack()) {
+  if (gesture === 'Palm_Wave' && canWaveSkip()) {
     await recordHandGesture('skip_track', 'Palm_Wave', 'music_skip', 'music', confidence);
-    await nextTrack();
+    await nextTrack('hand');
     return true;
   }
   return false;
@@ -1299,6 +1379,13 @@ function updatePalmToggleState(palmState, now) {
   return isTransition;
 }
 
+function isWaveInProgress() {
+  // 手势轨迹已出现明显横向分量时视为“挥手进行中”，此时抑制开合切换，避免误判。
+  if (handMotionHistory.length < 2) return false;
+  const xs = handMotionHistory.map((sample) => sample.x);
+  return Math.max(...xs) - Math.min(...xs) >= HAND_WAVE_MIN_HORIZONTAL_SPAN * 0.6;
+}
+
 function observeHandGesture(result, now) {
   const landmarks = result.handLandmarks?.[0];
   const category = result.gestures?.[0]?.[0];
@@ -1310,19 +1397,9 @@ function observeHandGesture(result, now) {
   const palmToggle = updatePalmToggleState(palmState, now);
   // 挥动时分类器偶尔会短暂丢失“张开手掌”，仍在最近识别到张开的短窗口内追踪其轨迹。
   const waveEligible = Boolean(landmarks && now <= handOpenSeenUntil);
-  if (palmToggle) {
-    handGestureCandidate = undefined;
-    handMotionHistory = [];
-    handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
-    if (now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
-    lastHandGestureAt = now;
-    void applyHandGesture('Palm_Toggle', 0.8).then((handled) => {
-      setHandGestureStatus(handled
-        ? '已通过手掌开合处理。'
-        : '已识别手掌开合；当前没有可控制的音乐。');
-    });
-    return;
-  } else if (detectPalmWave(landmarks, now, waveEligible)) {
+  // 先判挥手（大幅横向/斜向运动）再判开合（原地切换）：
+  // 挥手起手时的张手动作不应被误判成暂停 / 继续。
+  if (detectPalmWave(landmarks, now, waveEligible)) {
     handGestureCandidate = undefined;
     handMotionHistory = [];
     handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
@@ -1331,14 +1408,28 @@ function observeHandGesture(result, now) {
     void applyHandGesture('Palm_Wave', 0.8).then((handled) => {
       setHandGestureStatus(handled
         ? '已通过斜向 / 横向挥手切换下一首。'
-        : '已识别挥手；请先选中音乐播放卡片。');
+        : '已识别挥手；请先开启音乐模式并播放歌曲。');
     });
     return;
-  } else if (palmState) {
+  }
+  if (palmToggle && !isWaveInProgress()) {
+    handGestureCandidate = undefined;
+    handMotionHistory = [];
+    handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
+    if (now - lastHandGestureAt < HAND_GESTURE_COOLDOWN_MS) return;
+    lastHandGestureAt = now;
+    void applyHandGesture('Palm_Toggle', 0.8).then((handled) => {
+      setHandGestureStatus(handled
+        ? '已通过手掌开合处理。'
+        : '已识别手掌开合；请先选中音乐播放卡片。');
+    });
+    return;
+  }
+  if (palmState) {
     handGestureCandidate = undefined;
     handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
     setHandGestureStatus(palmState === 'open'
-      ? '已识别张开手掌：原位握拳可暂停 / 继续；横向或斜向挥动可切下一首。'
+      ? '已识别张开手掌：横向或斜向挥动可切下一首；原位握拳可暂停 / 继续（需先选中播放卡片）。'
       : '已识别握拳：原位张开手掌可暂停 / 继续。');
     return;
   }
@@ -1504,9 +1595,11 @@ function stopCamera(showMessage = true) {
 }
 
 function renderContacts() {
+  const profile = data.profiles.find((item) => item.id === activeProfileId);
+  const frequentContacts = new Set(profile?.frequent_contacts || []);
   $('#contacts').innerHTML = data.contacts.map((contact) => `
     <button class="card contact" data-id="${contact.id}">
-      <strong>${contact.name}</strong><small>${contact.relationship}${contact.frequent ? ' · 常用联系人' : ''}</small>
+      <strong>${contact.name}</strong><small>${contact.relationship}${frequentContacts.has(contact.id) ? ' · 常用联系人' : ''}</small>
     </button>`).join('');
   document.querySelectorAll('.contact').forEach((node) => node.addEventListener('click', async () => {
     clearGazeSuggestion();
@@ -1638,7 +1731,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '持续注视歌曲播放卡片约 0.55 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：原位开合手掌可暂停 / 继续，横向或斜向挥动张开的手掌可切下一首。';
+    : '持续注视歌曲播放卡片约 0.55 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：横向或斜向挥动张开的手掌可直接切下一首，原位开合手掌可暂停 / 继续（开合需先选中播放卡片）。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${musicCardSelected ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
@@ -1714,12 +1807,17 @@ function startDemoPlayback() {
   }, 500);
 }
 
-async function likeCurrentTrack(source = 'button') {
+async function likeCurrentTrack(source = 'button', motionStrength) {
   try {
     if (!currentTrack) return;
-    if (source === 'head') await recordHeadDecision('confirm', 'music_feedback', 'music');
+    if (source === 'head') await recordHeadDecision('confirm', 'music_feedback', 'music', motionStrength);
     if (source === 'hand') await recordHandGesture('confirm', 'Thumb_Up', 'music_feedback', 'music');
-    const result = await api('like_track', { track_id: currentTrack.id });
+    const body = { track_id: currentTrack.id };
+    // 头部反馈的幅度同时写入撤销栈，撤销时用于“未通过样本”自适应。
+    if (source === 'head' && typeof motionStrength === 'number' && motionStrength > 0 && motionStrength < 1) {
+      body.motion_strength = Number(motionStrength.toFixed(4));
+    }
+    const result = await api('like_track', body);
     playbackFeedbackRecorded = true;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
     musicGazeTrackId = undefined;
@@ -1760,13 +1858,17 @@ async function advanceAfterPlayback() {
   } catch (error) { toast(error.message); }
 }
 
-async function dislikeCurrentTrack(source = 'button') {
+async function dislikeCurrentTrack(source = 'button', motionStrength) {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
-    if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music');
+    if (source === 'head') await recordHeadDecision('reject', 'music_feedback', 'music', motionStrength);
     if (source === 'hand') await recordHandGesture('reject', 'Thumb_Down', 'music_feedback', 'music');
-    const result = await api('dislike_track', { current_track_id: currentTrack.id });
+    const body = { current_track_id: currentTrack.id };
+    if (source === 'head' && typeof motionStrength === 'number' && motionStrength > 0 && motionStrength < 1) {
+      body.motion_strength = Number(motionStrength.toFixed(4));
+    }
+    const result = await api('dislike_track', body);
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
@@ -1778,11 +1880,14 @@ async function dislikeCurrentTrack(source = 'button') {
   } catch (error) { toast(error.message); }
 }
 
-async function nextTrack() {
+async function nextTrack(source = 'button') {
   try {
     if (!currentTrack) return;
     stopDemoPlayback();
-    const result = await api('next_track', { current_track_id: currentTrack.id });
+    const body = { current_track_id: currentTrack.id };
+    // 挥手触发的切歌写入交互历史，便于可解释展示。
+    if (source === 'hand') body.input_modality = 'hand_gesture';
+    const result = await api('next_track', body);
     currentTrack = result.track;
     currentRecommendationReason = result.recommendation_reason;
     currentPreferencePlaylist = result.preference_playlist || currentPreferencePlaylist;
@@ -1809,18 +1914,48 @@ function showSchedule(result) {
         <small>${item.content || '无补充说明'}</small>
       </label>
     </article>`).join('');
-  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${items}</div>`;
+  const fusionNote = fusionSummary(result);
+  const llmMessage = result.llm?.used && result.message
+    ? `<p class="assistant-answer"><span>个性化建议</span>${escapeHtml(result.message)}</p>` : '';
+  const llmReasons = (result.explanation || [])
+    .filter((item) => item.startsWith('本地大模型'))
+    .map((item) => `<small class="fusion-note">${escapeHtml(item)}</small>`).join('');
+  const offer = result.reminder_offer;
+  const offerHtml = offer
+    ? (offer.already_set
+        ? `<div class="reminder-offer"><strong>提醒</strong><p>已设置 <b>${escapeHtml(offer.remind_time)}</b> 的「${escapeHtml(offer.title)}」提醒。</p></div>`
+        : `<div class="reminder-offer"><strong>提醒建议</strong><p>需要我在 <b>${escapeHtml(offer.remind_time)}</b> 提醒你参加「${escapeHtml(offer.title)}」吗？${offer.due_now ? '<small>（提醒时间已到，可立即提醒）</small>' : ''}</p><button class="secondary" id="accept-reminder">提醒我</button><button class="secondary" id="decline-reminder">不要</button></div>`)
+    : '';
+  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${llmMessage}${llmReasons}${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${offerHtml}${items}</div>`;
   document.querySelectorAll('[data-event-key]').forEach((checkbox) => {
     checkbox.addEventListener('change', async () => {
       try {
         await api('toggle_event_completion', { event_key: checkbox.dataset.eventKey, completed: checkbox.checked });
-        showSchedule(await api('query_schedule'));
+        showSchedule(await api('query_schedule', { record_history: false }));
       } catch (error) {
         toast(error.message);
         checkbox.checked = !checkbox.checked;
       }
     });
   });
+  if (offer && !offer.already_set) {
+    const accept = $('#accept-reminder');
+    const decline = $('#decline-reminder');
+    if (accept) accept.onclick = async () => {
+      try {
+        const reminderResult = await api('create_reminder', { event_key: offer.event_key });
+        toast(reminderResult.message);
+        showSchedule(await api('query_schedule', { record_history: false }));
+      } catch (error) { toast(error.message); }
+    };
+    if (decline) decline.onclick = async () => {
+      try {
+        const reminderResult = await api('decline_reminder');
+        toast(reminderResult.message);
+        showSchedule(await api('query_schedule', { record_history: false }));
+      } catch (error) { toast(error.message); }
+    };
+  }
   void recordScreenContext();
 }
 
@@ -1913,18 +2048,242 @@ function openMemoPicker(mode) {
   $('#memo-file').click();
 }
 
+const HISTORY_PAGE_LABELS = { message: '消息', music: '音乐', memo: '日程' };
+const HISTORY_ACTION_LABELS = {
+  open_page: '打开页面',
+  select_contact: '选择联系人',
+  undo: '撤销操作',
+  like_track: '喜欢歌曲',
+  dislike_track: '不喜欢歌曲',
+  toggle_playback: '暂停 / 继续播放',
+  confirm: '确认发送消息',
+  reject: '摇头拒绝',
+  stable_gaze: '稳定注视',
+  send_message: '准备消息发送',
+  cancel: '取消操作',
+  query_schedule: '查询日程',
+  cancel_music_selection: '取消歌曲选择',
+  authorize_memo: '授权备忘录',
+  revoke_memo: '取消备忘录授权',
+  toggle_event_completion: '更新日程完成状态',
+  create_reminder: '创建提醒',
+  decline_reminder: '取消提醒',
+  prepare_message: '准备消息',
+  confirm_send: '发送消息',
+  cancel_message: '取消发送',
+  start_mode: '进入音乐模式',
+  complete_track: '完整收听',
+  next_track: '切换下一首',
+  advance_track: '自动切歌',
+  stop_mode: '停止音乐模式',
+  play_music: '播放歌曲',
+  query_priority: '查询优先级事项',
+  decline_reminder: '取消提醒',
+  update_reminder_preference: '设置提醒偏好',
+  request_edit_memo: '请求修改备忘录',
+};
+
+function resolveTargetName(page, targetId) {
+  if (!targetId) return '';
+  if (page === 'message') {
+    const contact = data.contacts.find((item) => item.id === targetId);
+    return contact?.name || '';
+  }
+  if (page === 'music') {
+    const track = data.music_library.find((item) => item.id === targetId);
+    return track?.title || '';
+  }
+  if (page === 'memo') return targetId; // 授权文件名、日程标题等后端已给出可读文本
+  return '';
+}
+
+const HISTORY_MODALITY_HINT = {
+  speech_text: '通过语音',
+  gaze: '通过视线',
+  head_gesture: '通过头部动作',
+  hand_gesture: '通过手势',
+};
+
+function describeHistoryRecord(record) {
+  const name = resolveTargetName(record.page, record.target_id);
+  const via = HISTORY_MODALITY_HINT[record.modality];
+  const prefix = via ? `${via} ` : '';
+  switch (record.action) {
+    case 'open_page': return `打开了${HISTORY_PAGE_LABELS[record.page] || record.page}页面`;
+    case 'select_contact': return name ? `${prefix}选中了联系人「${name}」` : `${prefix}选择了联系人`;
+    case 'like_track': return name ? `${prefix}喜欢了歌曲《${name}》` : `${prefix}喜欢了当前歌曲`;
+    case 'dislike_track': return name ? `${prefix}不喜欢歌曲《${name}》` : `${prefix}不喜欢了当前歌曲`;
+    case 'toggle_playback': return `${prefix}暂停 / 继续了播放`;
+    case 'undo': return '撤销了一步操作';
+    case 'send_message': return name ? `${prefix}准备了发送给「${name}」的消息` : `${prefix}准备了消息发送`;
+    case 'confirm': return `${prefix}确认发送了消息`;
+    case 'cancel': return `${prefix}取消了操作`;
+    case 'query_schedule': return `${prefix}查询了日程`;
+    case 'next_track': return `${prefix}切换了下一首`;
+    case 'cancel_music_selection': return `${prefix}取消了歌曲选择`;
+    case 'authorize_memo': return name ? `授权了备忘录「${name}」` : '授权了备忘录';
+    case 'revoke_memo': return name ? `取消了备忘录「${name}」的授权` : '取消了备忘录授权';
+    case 'toggle_event_completion': return name ? `更新了日程「${name}」的完成状态` : '更新了日程完成状态';
+    case 'create_reminder': return name ? `创建了「${name}」的提醒` : '创建了提醒';
+    case 'decline_reminder': return '取消了本次提醒';
+    case 'confirm_send': return '发送了消息';
+    case 'cancel_message': return '取消了发送';
+    case 'reject': return '摇头拒绝';
+    case 'stable_gaze': return name ? `稳定注视了「${name}」` : '稳定注视了页面对象';
+    default: return HISTORY_ACTION_LABELS[record.action] || record.action;
+  }
+}
+
+function renderHistory(result) {
+  const node = $('#history-list');
+  if (!node) return;
+  const records = result.records || [];
+  if (!records.length) {
+    node.textContent = '暂无本地交互历史。';
+    return;
+  }
+  node.innerHTML = records.map((record) => {
+    const time = new Date(record.timestamp_ms).toLocaleTimeString('zh-CN', { hour12: false });
+    return `<div class="history-row"><span>${escapeHtml(describeHistoryRecord(record))}</span><small>${escapeHtml(time)}</small></div>`;
+  }).join('');
+}
+
+function renderGestureProfile(profile) {
+  const node = $('#gesture-profile-info');
+  if (!node) return;
+  if (!profile) {
+    node.textContent = '';
+    return;
+  }
+  const samples = profile.confirmed_samples || [];
+  const undone = profile.undone_samples || [];
+  const threshold = Number(profile.head_min_strength || 0);
+  if (typeof threshold === 'number') adaptiveHeadMinStrength = threshold;
+  node.textContent = samples.length
+    ? `头部动作自适应画像：已学习 ${samples.length} 次确认幅度（最近 ${samples[samples.length - 1].toFixed(3)}），${undone.length} 次未通过样本，当前最小触发阈值 ${threshold.toFixed(3)}。`
+    : '头部动作自适应画像：尚无样本。点头/摇头确认后会自动学习幅度并微调触发阈值。';
+}
+
+async function refreshHistory() {
+  try {
+    const result = await api('get_interaction_history');
+    renderHistory(result);
+    renderGestureProfile(result.gesture_profile);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function runSuggestedAction(actionId) {
+  try {
+    if (actionId === 'focus_contacts') {
+      const profile = data.profiles.find((item) => item.id === activeProfileId);
+      const frequent = new Set(profile?.frequent_contacts || []);
+      const names = data.contacts.filter((contact) => frequent.has(contact.id)).map((contact) => contact.name);
+      $('#contacts')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      toast(names.length ? `常用联系人：${names.join('、')}` : '暂无常用联系人记录。');
+      return;
+    }
+    if (actionId === 'prepare_message') { $('#message-content')?.focus(); return; }
+    if (actionId === 'start_focus') { await requestMode('focus'); return; }
+    if (actionId === 'resume_music') { await activateGeneralMusic(); return; }
+    if (actionId === 'query_schedule') { showSchedule(await api('query_schedule')); return; }
+    if (actionId === 'query_today') { showSchedule(await api('query_schedule', { scope: 'today' })); return; }
+    toast('该建议暂不支持直接执行。');
+  } catch (error) { toast(error.message); }
+}
+
+function renderPageSuggestions(result) {
+  const text = $('#page-suggestion-text');
+  const actions = $('#page-suggestion-actions');
+  if (text) text.textContent = result.message || '根据你的本地使用习惯，可能想进行这些操作：';
+  if (!actions) return;
+  const list = result.actions || [];
+  actions.innerHTML = list.length
+    ? list.map((item) => `<button class="secondary suggestion-action" data-action-id="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button>`).join('')
+    : '<small class="note">暂无可用建议。</small>';
+  actions.querySelectorAll('.suggestion-action').forEach((button) => {
+    button.onclick = () => runSuggestedAction(button.dataset.actionId);
+  });
+}
+
+async function loadPageSuggestions(page) {
+  try {
+    renderPageSuggestions(await api('open_page', { page }));
+  } catch (error) {
+    const text = $('#page-suggestion-text');
+    if (text) text.textContent = '暂无法生成本地建议。';
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('.nav-button').forEach((node) => node.addEventListener('click', async () => {
-    if (node.dataset.page !== 'music' && activeMode) await stopMode();
+    // 切换页面不停止音乐模式：模式只在显式“停止模式”、切换演示用户或刷新页面时结束。
     document.querySelectorAll('.nav-button, .page').forEach((item) => item.classList.remove('active'));
     node.classList.add('active');
     $(`#${node.dataset.page}-page`).classList.add('active');
     setCameraContext(node.textContent.trim());
     void recordScreenContext();
+    void loadPageSuggestions(node.dataset.page);
     if (node.dataset.page === 'music' && !activeMode) await activateGeneralMusic();
   }));
 
+  $('#refresh-history').onclick = refreshHistory;
+  $('#undo-nontext').onclick = async () => {
+    try {
+      const result = await api('undo_last_nontext_operation');
+      toast(result.message);
+      if (result.kind === 'toggle_playback') {
+        toggleDemoPlayback();
+      } else if (result.kind === 'clear_contact') {
+        selectedContactId = undefined;
+        selectedContactSource = undefined;
+        pendingMessage = undefined;
+        document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
+        $('#message-result').innerHTML = '';
+      } else if (result.kind === 'remove_authorized_sources') {
+        renderAuthorizedSources(result.authorized_sources || [], result.message);
+        $('#memo-result').innerHTML = '';
+      } else if (result.kind === 'restore_event_completion') {
+        showSchedule(await api('query_schedule', { record_history: false }));
+      }
+      await refreshHistory();
+    } catch (error) { toast(error.message); }
+  };
+  $('#clear-history').onclick = async () => {
+    if (!window.confirm('确定清空本地交互历史、撤销记录和手势自适应信息吗？')) return;
+    try {
+      const result = await api('clear_interaction_history');
+      toast(result.message);
+      await refreshHistory();
+    } catch (error) { toast(error.message); }
+  };
+
   $('#prepare-message').onclick = submitSimulatedSpeech;
+  $('#profile').onchange = async (event) => {
+    try {
+      const result = await api('select_profile', { profile_id: event.target.value });
+      activeProfileId = event.target.value;
+      data.state = result.state;
+      activeMode = result.state.active_mode;
+      selectedContactId = undefined;
+      selectedContactSource = undefined;
+      pendingMessage = undefined;
+      currentTrack = undefined;
+      currentPreferencePlaylist = [];
+      $('#message-content').value = '';
+      $('#message-result').innerHTML = '';
+      $('#music-result').innerHTML = '';
+      $('#memo-result').innerHTML = '';
+      renderContacts();
+      renderModes();
+      renderAuthorizedSources(result.state.authorized_sources || [], result.message);
+      toast(result.message);
+    } catch (error) {
+      event.target.value = activeProfileId;
+      toast(error.message);
+    }
+  };
   $('#refresh-multimodal-events').onclick = refreshMultimodalInspector;
   $('#multimodal-inspector').addEventListener('toggle', (event) => {
     if (event.currentTarget.open) void refreshMultimodalInspector();
@@ -2164,6 +2523,8 @@ async function init() {
   data = await (await fetch('/api/bootstrap')).json();
   gazeMapper = loadGazeCalibration();
   $('#profile').innerHTML = data.profiles.map((profile) => `<option value="${profile.id}">${profile.display_name}</option>`).join('');
+  activeProfileId = data.state.active_profile_id;
+  $('#profile').value = activeProfileId;
   if (data.state.authorized_sources?.length) {
     renderAuthorizedSources(data.state.authorized_sources, '已从本机保存的授权记录恢复。文件若已改动，请选择更新后的同名文件并同步。');
   }
@@ -2173,7 +2534,12 @@ async function init() {
   bindEvents();
   updateCameraControls(false);
   if (gazeMapper) $('#gaze-feedback').textContent = '已加载本机视线校准记录；如更换坐姿、摄像头或屏幕，请重新校准。';
+  if (data.demo_reference_date) {
+    const demoNote = $('#demo-date-note');
+    if (demoNote) demoNote.textContent = `演示基准日期：${data.demo_reference_date}（“今天 / 明天 / 已过时间”均以此推算）。`;
+  }
   void recordScreenContext();
+  void loadPageSuggestions('message');
 }
 
 init().catch((error) => toast(`初始化失败：${error.message}`));
