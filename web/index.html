@@ -50,6 +50,20 @@
         <button class="nav-button" data-page="music">音乐</button>
         <button class="nav-button" data-page="memo">日程安排</button>
         <p class="note">顶部摄像头开关一次授权后可供三个模块共用。后续将把页面上下文、视线落点与模拟语音合并理解。</p>
+        <section class="page-suggestions" aria-live="polite">
+          <strong>可能想做的事</strong>
+          <p id="page-suggestion-text">正在根据本地使用习惯准备建议。</p>
+          <div id="page-suggestion-actions"></div>
+        </section>
+        <details class="local-history" id="local-history">
+          <summary>本地交互历史与撤销</summary>
+          <p>这里只展示你实际执行过的操作；不保存画面、语音或消息正文。</p>
+          <button class="secondary" id="undo-nontext">撤销上一步操作</button>
+          <button class="secondary" id="refresh-history">刷新历史</button>
+          <button class="secondary" id="clear-history">清空本地历史</button>
+          <div class="history-list" id="history-list">展开后可查看。</div>
+          <p class="note" id="gesture-profile-info">展开历史后可查看头部动作自适应画像。</p>
+        </details>
       </aside>
 
       <section class="page active" id="message-page">
@@ -94,6 +108,7 @@
         <p class="section-label">场景 C · 用户授权的本地备忘录</p>
         <h2>日程安排</h2>
         <p>可授权多个 `.txt`、`.md` 或 `.json` 备忘录。文件选择窗口中按住 <kbd>Ctrl</kbd> 可逐个多选、按住 <kbd>Shift</kbd> 可选择连续文件。浏览器不会在后台读取你的文件；文件改动后，请重新选择该文件以更新本地授权副本。</p>
+        <p class="note" id="demo-date-note"></p>
         <input id="memo-file" type="file" accept=".txt,.md,.json" multiple hidden />
         <div class="authorization-actions">
           <button class="secondary" id="choose-memo">选择并授权备忘录文件</button>
