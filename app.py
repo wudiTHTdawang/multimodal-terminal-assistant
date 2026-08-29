@@ -510,29 +510,44 @@ def find_contact(contact_id):
     )
 
 
+def find_contact_by_name(name):
+    return next(
+        (item for item in read_json(DATA_DIR / "contacts.json") if item.get("name") == str(name).strip()),
+        None,
+    )
+
+
 def parse_simulated_speech(text):
+    """返回 (intent, content, spoken_contact_name)；spoken_contact_name 可为空。"""
     normalized = re.sub(r"\s+", "", text)
     if normalized in {"取消当前歌曲选择", "取消歌曲选择", "取消音乐选择", "不选这首", "不操作这首"}:
-        return "cancel_music_selection", ""
+        return "cancel_music_selection", "", ""
     if normalized in {"下一首", "切下一首", "换一首"}:
-        return "next_track", ""
+        return "next_track", "", ""
     if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
-        return "cancel", ""
+        return "cancel", "", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
-        return "confirm", ""
+        return "confirm", "", ""
+    # 显式否定优先于发送指令：不要/别/不 + 给X + 发消息 → 取消（安全原则）
+    if re.search(r"(?:不要|别|不)(?:给他|给她|给它|给[\u4e00-\u9fa5A-Za-z0-9]{1,6})?(?:发消息|发送消息|发信息|发送信息)", normalized):
+        return "cancel", "", ""
     if "安排" in normalized or "日程" in normalized:
         if "明天" in normalized:
-            return "query_schedule_tomorrow", ""
+            return "query_schedule_tomorrow", "", ""
         if "今天" in normalized:
-            return "query_schedule_today", ""
+            return "query_schedule_today", "", ""
         if any(word in normalized for word in ("全部", "所有", "最近")):
-            return "query_schedule_all", ""
-    match = re.search(r"(?:给他|给她|给它|给)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
+            return "query_schedule_all", "", ""
+    # “给X发消息，正文”：提取联系人名（“他/她/它”不是联系人名，由视线/手动选择兜底）
+    match = re.search(r"给([\u4e00-\u9fa5A-Za-z0-9]{1,6})(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
+    if match:
+        return "send_message", match.group(2).strip(), match.group(1)
+    match = re.search(r"(?:给他|给她|给它)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
-        return "send_message", match.group(1).strip()
+        return "send_message", match.group(1).strip(), ""
     if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息")):
-        return "send_message", ""
-    return "unknown", ""
+        return "send_message", "", ""
+    return "unknown", "", ""
 
 
 def visible_target_ids(events, page, timestamp_ms):
@@ -600,7 +615,7 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
     if not speech_events:
         raise ValueError("未找到对应的模拟语音事件，请重新提交。")
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
-    intent, content = parse_simulated_speech(str(speech["payload"].get("text", "")))
+    intent, content, spoken_contact_name = parse_simulated_speech(str(speech["payload"].get("text", "")))
 
     if intent == "cancel_music_selection":
         return {"message": "已取消当前歌曲选择；你可以重新注视并确认另一首歌曲。", "intent": intent, "explanation": [f"识别到音乐取消指令：{speech['payload']['text']}"]}
@@ -647,6 +662,7 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         return {"message": "请补充需要发送的消息内容。", "intent": intent, "needs_clarification": True, "explanation": ["识别到发送消息意图，但缺少消息正文。"]}
 
     manual_contact = find_contact(preferred_contact_id) if preferred_contact_id else None
+    spoken_contact = find_contact_by_name(spoken_contact_name) if spoken_contact_name else None
     gaze_events = [
         item for item in events
         if item["modality"] == "gaze"
@@ -655,7 +671,14 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         and speech_timestamp_ms - 4_000 <= item["timestamp_ms"] <= speech_timestamp_ms + 1_000
     ]
     gaze = max(gaze_events, key=lambda item: (item["confidence"], item["payload"].get("dwell_ms", 0)), default=None)
-    if manual_contact:
+    # 安全原则：置信度不足的视线不作为对象依据，改走澄清，不直接采用。
+    low_gaze_confidence = gaze is not None and gaze["confidence"] < 0.55
+    if low_gaze_confidence:
+        gaze = None
+    if spoken_contact:
+        contact = spoken_contact
+        target_explanation = f"本轮优先使用语音中明确说出的联系人：{contact['name']}。"
+    elif manual_contact:
         contact = manual_contact
         target_explanation = f"本轮优先使用手动选中的联系人：{contact['name']}。"
     elif gaze:
@@ -679,7 +702,10 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
     else:
         contact = find_contact(state.get("selected_contact"))
         if not contact:
-            return {"message": "请先注视确认或手动点击需要联系的联系人，再提交模拟语音。", "intent": intent, "needs_clarification": True, "explanation": ["未找到有效视线事件，也没有手动选中的联系人。"]}
+            explanation = ["未找到有效视线事件，也没有手动选中的联系人。"]
+            if low_gaze_confidence:
+                explanation.append("检测到视线事件但置信度不足，按安全原则不直接采用。")
+            return {"message": "请先注视确认或手动点击需要联系的联系人，再提交模拟语音。", "intent": intent, "needs_clarification": True, "explanation": explanation}
         target_explanation = f"未使用有效视线事件，改用手动选中的联系人：{contact['name']}。"
 
     pending = {"contact": contact["name"], "contact_id": contact["id"], "content": content}
@@ -736,7 +762,7 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
     if not speech_events:
         raise ValueError("未找到对应的模拟语音事件，请重新提交。")
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
-    intent, _ = parse_simulated_speech(str(speech["payload"].get("text", "")))
+    intent, _, _ = parse_simulated_speech(str(speech["payload"].get("text", "")))
     result = understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id)
     fusion = summarize_multimodal_alignment(events, speech["payload"].get("page", "unknown"), speech_timestamp_ms, intent)
     result["fusion"] = fusion
@@ -946,7 +972,7 @@ def schedule_query_result(state, target_date=None, title="全部日程"):
     items = schedule_items(state)
     if target_date:
         items = [item for item in items if item.get("date") == target_date]
-    return {
+    result = {
         "message": f"已整理{title}。",
         "title": title,
         "items": items,
@@ -955,6 +981,9 @@ def schedule_query_result(state, target_date=None, title="全部日程"):
         "past": sum(item["is_past"] for item in items),
         "reminder_offer": build_reminder_offer(state, items),
     }
+    if target_date:
+        result["date"] = target_date
+    return result
 
 
 def understand_schedule_query(state, intent, speech):

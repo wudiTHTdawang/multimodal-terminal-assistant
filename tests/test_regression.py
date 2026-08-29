@@ -1,0 +1,216 @@
+"""P0/P1/P2 与验收样例修复的回归测试。
+
+运行：python -m unittest tests.test_regression
+覆盖：演示基准日期、提醒 offer/去重/撤销、建议面板历史映射、手势自适应画像、
+next_track 历史、遗留字段清理，以及运行器暴露的新安全修复
+（“给X发消息”联系人名解析、否定句取消、低置信度视线澄清）。
+"""
+
+import json
+import tempfile
+import time
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+import app
+
+
+class RegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.original_save = app.save_state
+        self.original_llm = app.LOCAL_LLM_ENABLED
+        app.save_state = lambda _state: None
+        app.LOCAL_LLM_ENABLED = False
+        app.MULTIMODAL_EVENT_BUFFER.clear()
+        self.handler = object.__new__(app.AssistantHandler)
+
+    def tearDown(self):
+        app.save_state = self.original_save
+        app.LOCAL_LLM_ENABLED = self.original_llm
+        app.MULTIMODAL_EVENT_BUFFER.clear()
+
+    @staticmethod
+    def state_with_memo():
+        state = app.default_state()
+        state["active_profile_id"] = "user_xiaoyu"
+        state["authorized_sources"] = [
+            {"display_name": "memo_demo.json", "stored_name": "memo_demo.json", "item_count": 4},
+        ]
+        return state
+
+    # ---------- 演示基准日期 ----------
+
+    def test_demo_now_anchors_past_and_schedule(self):
+        original_now = app.demo_now
+        app.demo_now = lambda: datetime(2026, 8, 23, 12, 0)
+        try:
+            self.assertFalse(app.is_past_event({"date": "2026-08-24", "time": "10:00"}))
+            self.assertTrue(app.is_past_event({"date": "2026-08-23", "time": "10:00"}))   # 早于演示正午
+            self.assertFalse(app.is_past_event({"date": "2026-08-23", "time": "18:00"}))  # 晚于演示正午
+            result = app.schedule_query_result(self.state_with_memo(), "2026-08-24", "明天（2026-08-24）日程")
+            self.assertEqual(result["date"], "2026-08-24")
+            self.assertEqual(result["total"], 3)
+        finally:
+            app.demo_now = original_now
+
+    def test_query_schedule_scope_today_and_tomorrow(self):
+        state = self.state_with_memo()
+        today = app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "query_schedule", "scope": "today", "record_history": False,
+        }, state)
+        self.assertEqual(today["title"], "今天（2026-08-23）日程")
+        tomorrow = app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "query_schedule", "scope": "tomorrow", "record_history": False,
+        }, state)
+        self.assertEqual(tomorrow["date"], "2026-08-24")
+        self.assertEqual(tomorrow["total"], 3)
+
+    # ---------- 提醒链路 ----------
+
+    def test_reminder_offer_dedupe_and_undo(self):
+        state = self.state_with_memo()
+        offer = app.schedule_query_result(state, "2026-08-24")["reminder_offer"]
+        self.assertIsNotNone(offer)
+        self.assertEqual(offer["remind_time"], "2026-08-24 09:10")  # 10:00 - 画像提前量 50 分钟
+        first = app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "create_reminder", "event_key": offer["event_key"],
+        }, state)
+        self.assertIn("已在本项目内创建", first["message"])
+        second = app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "create_reminder", "event_key": offer["event_key"],
+        }, state)
+        self.assertIn("未重复创建", second["message"])
+        self.assertEqual(len(state["reminders"]), 1)
+        undo = app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "undo_last_nontext_operation",
+        }, state)
+        self.assertIn("已撤销", undo["message"])
+        self.assertEqual(state["reminders"], [])
+
+    # ---------- 建议面板个性化 ----------
+
+    def test_page_suggestions_use_history_mapping(self):
+        state = app.default_state()
+        state["active_profile_id"] = "user_xiaoyu"
+        state["interaction_history"] = [
+            {"page": "message", "action": "open_page", "modality": "ui"},
+            {"page": "message", "action": "open_page", "modality": "ui"},
+            {"page": "message", "action": "select_contact", "modality": "gaze", "target_id": "contact_zhangsan"},
+            {"page": "message", "action": "send_message", "modality": "speech_text"},
+            {"page": "message", "action": "confirm_send", "modality": "ui"},
+            {"page": "message", "action": "undo", "modality": "ui"},
+        ]
+        summary = app.history_summary(state, "message")
+        self.assertNotIn("open_page", summary["frequent_actions"])
+        self.assertNotIn("undo", summary["frequent_actions"])
+        result = app.page_suggestions(state, "message")
+        ids = [item["id"] for item in result["actions"]]
+        self.assertEqual(ids[0], "prepare_message")  # 3 分，高于 focus_contacts 的 2 分
+        self.assertIn("focus_contacts", ids)
+
+    # ---------- 手势自适应画像 ----------
+
+    def test_gesture_profile_learning_and_adaptive_threshold(self):
+        state = app.default_state()
+        state["gesture_profile"] = {"head_min_strength": 0.0, "confirmed_samples": [], "undone_samples": []}
+        app.update_gesture_profile(state, {
+            "modality": "head_gesture",
+            "payload": {"page": "music", "decision": "confirm", "motion_strength": 0.42},
+        })
+        self.assertEqual(state["gesture_profile"]["confirmed_samples"], [0.42])
+        state["active_profile_id"] = "user_xiaoyu"
+        state["active_mode"] = "focus"
+        app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "like_track", "track_id": "track_010",
+            "input_modality": "head_gesture", "motion_strength": 0.31,
+        }, state)
+        app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "undo_last_nontext_operation",
+        }, state)
+        self.assertEqual(state["gesture_profile"]["undone_samples"], [0.31])
+        self.assertGreater(state["gesture_profile"]["head_min_strength"], 0)
+
+    # ---------- 挥手切歌历史 ----------
+
+    def test_next_track_records_history_with_modality(self):
+        state = app.default_state()
+        state["active_profile_id"] = "user_xiaoyu"
+        state["active_mode"] = "focus"
+        state["recommendation_turns"] = {"focus": 0}
+        state["track_preferences"] = {"focus": {"track_010": 1}}
+        state["mode_preference_playlists"] = {"focus": ["track_010"]}
+        app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "next_track", "current_track_id": "track_010", "input_modality": "hand_gesture",
+        }, state)
+        last = state["interaction_history"][-1]
+        self.assertEqual(last["action"], "next_track")
+        self.assertEqual(last["modality"], "hand_gesture")
+
+    # ---------- 遗留字段清理 ----------
+
+    def test_load_state_cleans_legacy_field(self):
+        original_file, original_cache = app.STATE_FILE, app.STATE_CACHE
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w", encoding="utf-8")
+        json.dump({
+            "active_profile_id": "user_xiaoyu",
+            "preference_adjustments": {"focus": {"lofi": 1}},
+            "profile_states": {"user_xiaoyu": {"preference_adjustments": {"focus": {"lofi": 1}}}},
+            "track_preferences": {"focus": {"track_010": 1}},
+        }, tmp, ensure_ascii=False)
+        tmp.close()
+        try:
+            app.STATE_FILE = Path(tmp.name)
+            app.STATE_CACHE = None
+            state = app.load_state()
+            self.assertNotIn("preference_adjustments", state)
+            self.assertNotIn("preference_adjustments", state["profile_states"]["user_xiaoyu"])
+        finally:
+            app.STATE_FILE = original_file
+            app.STATE_CACHE = original_cache
+            Path(tmp.name).unlink(missing_ok=True)
+
+    # ---------- 验收样例暴露的新安全修复 ----------
+
+    def test_spoken_contact_name_resolves(self):
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append({
+            "modality": "speech_text", "timestamp_ms": now, "received_at_ms": now,
+            "confidence": 1.0,
+            "payload": {"page": "message", "text": "给妈妈发消息，我晚点回家", "source": "simulated"},
+        })
+        state = {"selected_contact": None, "pending_message": None}
+        result = app.understand_multimodal_command(state, now)
+        self.assertEqual(result["pending"]["contact_id"], "contact_mama")
+        self.assertEqual(result["pending"]["content"], "我晚点回家")
+
+    def test_negative_speech_cancels_instead_of_send(self):
+        intent, content, spoken = app.parse_simulated_speech("不要给他发消息")
+        self.assertEqual(intent, "cancel")
+        self.assertEqual(content, "")
+        intent2, _, _ = app.parse_simulated_speech("别给她发消息")
+        self.assertEqual(intent2, "cancel")
+
+    def test_low_confidence_gaze_clarifies(self):
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.extend([
+            {
+                "modality": "gaze", "timestamp_ms": now - 500, "received_at_ms": now - 500,
+                "confidence": 0.43,
+                "payload": {"page": "message", "target_type": "contact", "target_id": "contact_zhangsan",
+                            "zone": "center", "dwell_ms": 1000},
+            },
+            {
+                "modality": "speech_text", "timestamp_ms": now, "received_at_ms": now,
+                "confidence": 1.0,
+                "payload": {"page": "message", "text": "给他发消息，晚点开会", "source": "simulated"},
+            },
+        ])
+        state = {"selected_contact": None, "pending_message": None}
+        result = app.understand_multimodal_command(state, now)
+        self.assertTrue(result.get("needs_clarification"))
+        self.assertNotIn("pending", result)
+
+
+if __name__ == "__main__":
+    unittest.main()
