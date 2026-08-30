@@ -151,13 +151,14 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .reminder-offer { margin-top: 10px; padding: 10px 12px; border: 1px dashed #e1ad35; border-radius: 10px; background: #fffaf0; display: grid; gap: 8px; }
 .reminder-offer p { margin: 0; font-size: 13px; line-height: 1.55; }
 .reminder-offer small { color: #9a7b2d; }
-.asr-status { margin: 14px 0 0; padding: 9px 10px; border-radius: 8px; color: #5b6b84; background: #eef2fa; font-size: 12px; line-height: 1.5; }
+.asr-status { margin: 0; padding: 8px 10px; border-radius: 8px; color: #5b6b84; background: #eef2fa; font-size: 12px; line-height: 1.5; }
 .voice-only-note { color: #66748a; font-size: 13px; line-height: 1.6; }
-.voice-result-box { display: grid; gap: 8px; margin-top: 14px; padding: 12px; border: 1px solid #d7e1f5; border-radius: 10px; background: #f9fbff; }
-.voice-result-box label { font-size: 13px; font-weight: 700; color: #314766; }
-.voice-result-box textarea { height: 64px; padding: 8px 10px; margin: 0; resize: vertical; border: 1px solid #cbd6ec; border-radius: 8px; font: inherit; font-size: 13px; }
-.voice-result-actions { display: flex; gap: 8px; }
-.voice-result-actions button { padding: 8px 14px; font-size: 13px; }
+.voice-box { display: grid; gap: 8px; margin-top: 18px; padding: 12px; border: 1px solid #d7e1f5; border-radius: 12px; background: #f9fbff; box-shadow: 0 2px 8px #263d930d; }
+.voice-box-title { font-size: 13px; font-weight: 700; color: #314766; }
+.voice-box textarea { height: 56px; padding: 8px 10px; margin: 0; resize: vertical; border: 1px solid #cbd6ec; border-radius: 8px; font: inherit; font-size: 13px; }
+.voice-result-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.voice-result-actions .voice-input { grid-column: 1 / -1; padding: 10px 14px; margin: 0; }
+.voice-result-actions button { padding: 9px 12px; margin: 0; font-size: 13px; }
 .toast { position: fixed; right: 28px; bottom: 26px; padding: 12px 18px; opacity: 0; transform: translateY(10px); color: #fff; border-radius: 9px; background: #1f315d; transition: .2s; pointer-events: none; }
 .toast.show { opacity: 1; transform: translateY(0); }
 @media (max-width: 920px) {

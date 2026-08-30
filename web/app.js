@@ -206,7 +206,7 @@ async function getAsrPipeline() {
 function setVoiceButtonsRecording(recording) {
   document.querySelectorAll('.voice-input').forEach((button) => {
     button.classList.toggle('recording', recording);
-    button.textContent = recording ? '■ 停止录音' : '🎤 语音输入';
+    button.textContent = recording ? '■ 停止录音' : '🎤 开始录音';
   });
   const status = $('#asr-status');
   if (status) status.classList.toggle('recording', recording);
