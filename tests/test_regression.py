@@ -67,6 +67,38 @@ class RegressionTests(unittest.TestCase):
         self.assertNotEqual(next_offer["event_key"], first_offer["event_key"])
         self.assertEqual(next_offer["title"], "提交实验报告")
 
+    def test_page_gated_voice_command_is_ignored(self):
+        # 日程页说音乐指令“播放下一首”应被忽略，不触发任何效果
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append({
+            "modality": "speech_text", "timestamp_ms": now, "received_at_ms": now,
+            "confidence": 1.0, "payload": {"page": "memo", "text": "播放下一首", "source": "simulated"},
+        })
+        result = app.understand_multimodal_command(app.default_state(), now)
+        self.assertTrue(result.get("ignored"))
+        self.assertIn("日程", result["message"])
+        # 音乐页说同样的话应正常解析为切歌
+        now2 = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append({
+            "modality": "speech_text", "timestamp_ms": now2, "received_at_ms": now2,
+            "confidence": 1.0, "payload": {"page": "music", "text": "播放下一首", "source": "simulated"},
+        })
+        result2 = app.understand_multimodal_command(app.default_state(), now2)
+        self.assertEqual(result2["intent"], "next_track")
+
+    def test_parse_new_phrasings(self):
+        cases = {
+            "发消息给李四，明天见": ("send_message", "明天见", "李四"),
+            "来首轻音乐": ("play_music", "轻音乐", ""),
+            "停止模式": ("stop_mode", "", ""),
+            "切歌": ("next_track", "", ""),
+            "这首歌好听": ("like_track", "", ""),
+            "看看日程": ("query_schedule_all", "", ""),
+        }
+        for text, expected in cases.items():
+            result = app.parse_simulated_speech(text)
+            self.assertEqual(result, expected, text)
+
     def test_demo_now_anchors_past_and_schedule(self):
         reference = app.demo_reference_date()
         original_now = app.demo_now

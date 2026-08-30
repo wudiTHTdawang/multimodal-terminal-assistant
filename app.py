@@ -539,11 +539,15 @@ def parse_simulated_speech(text):
     normalized = re.sub(r"\s+", "", text)
     if normalized in {"取消当前歌曲选择", "取消歌曲选择", "取消音乐选择", "不选这首", "不操作这首"}:
         return "cancel_music_selection", "", ""
-    if normalized in {"下一首", "切下一首", "换一首"}:
+    if normalized in {"下一首", "切下一首", "换一首", "切歌", "换首歌", "跳过这首", "下一曲", "切下一曲"}:
         return "next_track", "", ""
+    if normalized in {"喜欢这首", "这首歌好听", "好听", "好听的", "点赞", "收藏这首"}:
+        return "like_track", "", ""
+    if normalized in {"这首不喜欢", "这首歌不喜欢", "不喜欢这首", "不喜欢这首歌", "不喜欢这个", "这个不喜欢", "不喜欢", "不好听", "难听"}:
+        return "dislike_track", "", ""
     if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
         return "cancel", "", ""
-    if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好"}:
+    if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好", "确认发送消息"}:
         return "confirm", "", ""
     # 显式否定优先于发送指令：不要/别/不 + 给X + 发消息 → 取消（安全原则）
     if re.search(r"(?:不要|别|不)(?:给他|给她|给它|给[\u4e00-\u9fa5A-Za-z0-9]{1,6})?(?:发消息|发送消息|发信息|发送信息)", normalized):
@@ -575,10 +579,12 @@ def parse_simulated_speech(text):
     if normalized in {"这首不喜欢", "这首歌不喜欢", "不喜欢这首", "不喜欢这首歌", "不喜欢这个", "这个不喜欢", "不喜欢"}:
         return "dislike_track", "", ""
     # 音乐：模式启动与播放
-    if normalized in {"我准备学习", "开始专注", "开始学习", "进入专注模式", "我要学习"}:
+    if normalized in {"我准备学习", "开始专注", "开始学习", "进入专注模式", "我要学习", "学习模式", "专注模式"}:
         return "start_focus", "", ""
     if normalized == "播放学习音乐":
         return "offer_start_focus", "", ""
+    if any(word in normalized for word in ("停止模式", "停止播放", "停止音乐", "结束模式")):
+        return "stop_mode", "", ""
     # “播放下一首/下一曲”是切歌，不是播放一首叫“下一首”的歌。
     if "下一" in normalized and ("播放" in normalized or "切" in normalized or "换" in normalized or normalized in {"下一首", "下一曲", "下一首歌"}):
         return "next_track", "", ""
@@ -587,6 +593,14 @@ def parse_simulated_speech(text):
     match = re.search(r"播放([\u4e00-\u9fa5A-Za-z0-9-]{1,12})", normalized)
     if match:
         return "play_music", match.group(1), ""
+    match = re.search(r"(?:来首|放首|放点|来点)([\u4e00-\u9fa5A-Za-z0-9-]{1,12})", normalized)
+    if match:
+        return "play_music", match.group(1), ""
+    # “发消息给X，内容”：先于“给X发消息”处理。
+    match = re.search(r"发消息给([\u4e00-\u9fa5A-Za-z0-9]{1,6})[，,、：:]?(.+)", normalized)
+    if match:
+        content = re.sub(r"^(?:让他|让她|让它|告诉他|告诉她|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(2).strip())
+        return "send_message", content, match.group(1)
     # “给X发消息，正文”：提取联系人名（“他/她/它”不是联系人名，由视线/手动选择兜底）。
     # 正文去掉“让他/告诉她/跟他说/说”等祈使性插入语（例：“让他回来吃饭”→“回来吃饭”）。
     match = re.search(r"给([\u4e00-\u9fa5A-Za-z0-9]{1,6})(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
@@ -710,6 +724,24 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         raise ValueError("未找到对应的模拟语音事件，请重新提交。")
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
     intent, content, spoken_contact_name = parse_simulated_speech(str(speech["payload"].get("text", "")))
+    # 语音指令必须与当前页面匹配：日程页说“播放下一首”等音乐/消息指令会被忽略，不触发任何效果。
+    page = speech["payload"].get("page", "message")
+    page_intents = {
+        "message": {"send_message", "confirm", "cancel"},
+        "music": {"next_track", "cancel_music_selection", "like_track", "dislike_track",
+                  "start_focus", "play_music", "offer_start_focus", "stop_mode", "confirm", "cancel"},
+        "memo": {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all",
+                 "query_priority", "query_date_plan", "analyze_schedule_pressure",
+                 "decline_reminder", "update_reminder_preference", "request_edit_memo", "confirm", "cancel"},
+    }
+    if intent != "unknown" and intent not in page_intents.get(page, set()):
+        page_label = {"message": "消息", "music": "音乐", "memo": "日程"}.get(page, page)
+        return {
+            "message": f"当前在{page_label}页面，暂不支持“{speech['payload'].get('text', '')}”这个操作。",
+            "intent": intent,
+            "ignored": True,
+            "explanation": ["语音指令与当前页面不匹配，已忽略，未执行任何操作。"],
+        }
 
     if intent == "cancel_music_selection":
         return {"message": "已取消当前歌曲选择；你可以重新注视并确认另一首歌曲。", "intent": intent, "explanation": [f"识别到音乐取消指令：{speech['payload']['text']}"]}
@@ -840,6 +872,7 @@ SPEECH_HISTORY_ACTIONS = {
     "like_track": "like_track",
     "dislike_track": "dislike_track",
     "start_focus": "start_mode",
+    "stop_mode": "stop_mode",
     "play_music": "play_music",
     "query_priority": "query_schedule",
     "query_date_plan": "query_schedule",
@@ -1208,6 +1241,14 @@ def understand_music_command(state, intent, content, speech, events, current_tra
             "message": "当前未启用专注模式。需要我为你开启专注模式吗？",
             "intent": intent, "needs_clarification": True,
             "explanation": ["识别到学习/专注诉求，但音乐模式尚未启用。"],
+        }
+    if intent == "stop_mode":
+        clear_active_music_mode(state)
+        save_state(state)
+        return {
+            "message": "已停止当前音乐模式。",
+            "intent": intent,
+            "explanation": ["识别到停止模式指令。"],
         }
     if intent == "start_focus":
         state["active_mode"] = "focus"

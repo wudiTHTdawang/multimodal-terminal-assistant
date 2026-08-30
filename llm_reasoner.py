@@ -99,6 +99,16 @@ def enhance_local_response(*, scene, speech_text, rule_result, fusion, profile, 
     return _call_local_model(system, prompt_data)
 
 
+def _scene_corpus():
+    """读取随项目发布的语料库，作为大模型整理指令的句式示例。"""
+    corpus_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "voice_corpus.json")
+    try:
+        with open(corpus_path, encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, ValueError):
+        return {}
+
+
 def normalize_speech_command(text, scene=None):
     """把麦克风语音转写文本整理成规则可解析的规范指令。
 
@@ -106,11 +116,13 @@ def normalize_speech_command(text, scene=None):
     （“让他/告诉他/跟他说/说”）。本函数只做校正与改写，不得新增人物、消息内容、
     曲目或操作语义；失败或不合规时返回 None，由 app.py 回退原文。最终意图由安全规则决定。
     """
-    canonical = {
-        "message": "给X发消息，内容（内容里不要带“让他/告诉他”等插入语）/ 确认 / 取消",
-        "music": "下一首 / 播放下一首 / 我喜欢这首 / 这首不喜欢 / 我准备学习 / 播放Lo-fi / 取消当前歌曲选择",
-        "memo": "我今天有什么安排 / 我明天有什么安排 / 后天有什么安排 / 查看所有日程 / 不要提醒",
-    }.get(scene or "message", "给X发消息，内容")
+    fallback = {
+        "message": ["给他发消息，内容", "确认", "取消"],
+        "music": ["下一首", "我喜欢这首", "开始专注", "播放Lo-fi"],
+        "memo": ["我明天有什么安排", "查看所有日程", "不要提醒"],
+    }
+    examples = _scene_corpus().get(scene or "message") or fallback.get(scene or "message", fallback["message"])
+    canonical = " / ".join(str(item) for item in examples[:8])
     prompt_data = {
         "raw_text": _safe_text(text, 200),
         "scene": _safe_text(scene, 30),

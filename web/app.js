@@ -2698,10 +2698,6 @@ async function init() {
   bindEvents();
   updateCameraControls(false);
   if (gazeMapper) $('#gaze-feedback').textContent = '已加载本机视线校准记录；如更换坐姿、摄像头或屏幕，请重新校准。';
-  if (data.demo_reference_date) {
-    const demoNote = $('#demo-date-note');
-    if (demoNote) demoNote.textContent = `演示基准日期：${data.demo_reference_date}（“今天 / 明天 / 已过时间”均以此推算）。`;
-  }
   void recordScreenContext();
   void loadPageSuggestions('message');
 }
