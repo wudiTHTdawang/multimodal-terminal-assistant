@@ -51,6 +51,14 @@
         <button class="nav-button" data-page="memo">日程安排</button>
         <p class="note">顶部摄像头开关一次授权后可供三个模块共用。系统将把语音、视线落点与页面上下文合并理解。</p>
         <p class="asr-status" id="asr-status">语音识别：未加载。点击任一页面「🎤 语音输入」将首次加载本地模型（约 45MB）；音频在浏览器内识别，不出本机。</p>
+        <div class="voice-result-box">
+          <label for="voice-result">语音识别结果（确认后发送）</label>
+          <textarea id="voice-result" placeholder="语音识别到的文字会显示在这里，可修改后点击「确认发送」交给系统理解执行。"></textarea>
+          <div class="voice-result-actions">
+            <button class="primary" id="voice-confirm">确认发送</button>
+            <button class="secondary" id="voice-clear">清空</button>
+          </div>
+        </div>
         <section class="page-suggestions" aria-live="polite">
           <strong>可能想做的事</strong>
           <p id="page-suggestion-text">正在根据本地使用习惯准备建议。</p>

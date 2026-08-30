@@ -221,14 +221,37 @@ function webSpeechAvailable() {
 }
 
 function submitRecognizedText(targetId, text) {
-  const submitByTarget = {
-    'message': (recognized) => submitSimulatedSpeech('mic', recognized),
-    'music': (recognized) => submitSimulatedMusicCommand('mic', recognized),
-    'memo': (recognized) => submitScheduleSimulatedSpeech('mic', recognized),
-  };
-  const submit = submitByTarget[targetId];
-  if (submit) window.setTimeout(() => submit(text), 300);
+  // 语音识别结果先写入消息框，由用户确认后（「确认发送」）再交给后端大模型理解。
+  const box = $('#voice-result');
+  if (box) {
+    box.value = text;
+    box.focus();
+  }
+  setAsrStatus(`已识别：${text}。请确认后点击「确认发送」。`);
+  toast(`已识别：${text}`);
 }
+
+function confirmVoiceText() {
+  const box = $('#voice-result');
+  const text = (box?.value || '').trim();
+  if (!text) {
+    toast('请先语音输入或填写内容。');
+    return;
+  }
+  const activePage = document.querySelector('.page.active')?.id;
+  const page = activePage === 'music-page' ? 'music' : activePage === 'memo-page' ? 'memo' : 'message';
+  const submit = {
+    'message': () => submitSimulatedSpeech('mic', text),
+    'music': () => submitSimulatedMusicCommand('mic', text),
+    'memo': () => submitScheduleSimulatedSpeech('mic', text),
+  }[page];
+  if (box) box.value = '';
+  setAsrStatus('已发送，正在由本地大模型理解并执行…');
+  submit();
+}
+
+let webSpeechSeq = 0;
+let webSpeechRestartAttempts = 0;
 
 function startWebSpeechRecording(targetId) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -237,21 +260,20 @@ function startWebSpeechRecording(targetId) {
   recognizer.continuous = true;              // 持续聆听，直到用户点击「■ 停止录音」
   recognizer.interimResults = true;          // 说话时实时显示中间结果
   recognizer.maxAlternatives = 1;
-  webSpeechSession = { recognizer, targetId };
+  const session = { recognizer, targetId, seq: ++webSpeechSeq };
+  webSpeechSession = session;
   setVoiceButtonsRecording(true);
   setAsrStatus('正在聆听…（说话后点击「■ 停止录音」结束并识别）');
   recognizer.onresult = (event) => {
-    if (!webSpeechSession) return;
+    if (webSpeechSession !== session) return; // 防止上一会话迟到的回调污染当前会话
     const last = event.results[event.results.length - 1];
     const text = (last?.[0]?.transcript || '').trim();
     if (last?.isFinal) {
+      webSpeechSession = null;
+      setVoiceButtonsRecording(false);
       if (text) {
-        const target = webSpeechSession.targetId;
-        webSpeechSession = null;
-        setVoiceButtonsRecording(false);
-        setAsrStatus(`已识别：${text}。将提交给本地大模型理解后执行。`);
-        toast(`已识别：${text}`);
-        submitRecognizedText(target, text);
+        setAsrStatus(`已识别：${text}。请确认后点击「确认发送」。`);
+        submitRecognizedText(session.targetId, text);
       } else {
         setAsrStatus('未检测到语音内容，请对着麦克风再说一次。');
       }
@@ -260,27 +282,38 @@ function startWebSpeechRecording(targetId) {
     }
   };
   recognizer.onerror = (event) => {
-    if (!webSpeechSession) return;
+    if (webSpeechSession !== session) return;
     const error = event.error || 'unknown';
-    const target = webSpeechSession.targetId;
+    // 'aborted' 多为停止/快速重开时的良性中断：自动重试一次。
+    if (error === 'aborted' && webSpeechRestartAttempts < 2) {
+      webSpeechRestartAttempts += 1;
+      webSpeechSession = null;
+      setVoiceButtonsRecording(false);
+      setAsrStatus('语音识别被中断，正在自动重试…');
+      window.setTimeout(() => startWebSpeechRecording(session.targetId), 500);
+      return;
+    }
+    webSpeechRestartAttempts = 0;
     webSpeechSession = null;
     setVoiceButtonsRecording(false);
     if (['network', 'service-not-allowed', 'language-not-supported'].includes(error)) {
       setAsrStatus(`浏览器语音识别不可用（${error}），回退本地 Whisper（离线）。`);
-      void startAsrRecording(target);
+      void startAsrRecording(session.targetId);
     } else {
       setAsrStatus(`语音识别未成功：${error}。请再试一次。`);
     }
   };
   recognizer.onend = () => {
-    if (!webSpeechSession) return;
+    if (webSpeechSession !== session) return;
     webSpeechSession = null;
     setVoiceButtonsRecording(false);
     setAsrStatus('未检测到语音（语音识别已结束）。请点击「🎤」后说话，说完点「■ 停止录音」。');
   };
   try {
     recognizer.start();
+    webSpeechRestartAttempts = 0;
   } catch (error) {
+    if (webSpeechSession !== session) return;
     webSpeechSession = null;
     setVoiceButtonsRecording(false);
     setAsrStatus(`浏览器语音识别不可用：${error.message}；回退本地 Whisper。`);
@@ -983,6 +1016,9 @@ async function lockGazeTarget(node, zone, confidence) {
 
 // ---- 视线锁定日程事项 → 提醒生成询问 ----
 let pendingScheduleReminder = null;
+// 询问窗口内暂停视线重评：点头/摇头会带动眼部特征，避免被误判为“转移视线”而关掉弹窗。
+let scheduleGazeGestureWindowUntil = 0;
+const SCHEDULE_GAZE_GESTURE_WINDOW_MS = 3200;
 
 function clearScheduleReminderPrompt() {
   document.querySelector('.schedule-reminder-prompt')?.remove();
@@ -997,6 +1033,7 @@ function showScheduleReminderPrompt(node, eventKey, label) {
   document.body.append(prompt);
   positionGazePrompt(prompt, node);
   pendingScheduleReminder = { node, eventKey };
+  scheduleGazeGestureWindowUntil = performance.now() + SCHEDULE_GAZE_GESTURE_WINDOW_MS;
   prompt.querySelector('#schedule-prompt-accept').onclick = async () => {
     const target = pendingScheduleReminder;
     clearScheduleReminderPrompt();
@@ -1125,6 +1162,8 @@ function updateGazeTarget(prediction) {
   // 已锁定歌曲卡片时，给用户一个短暂且明确的反馈窗口。点头或摇头会明显改变
   // 眼睛、鼻子的相对位置，因此窗口内不再重算注视目标；超时后恢复正常注视判断。
   if (musicGestureWindowOpen) return;
+  // 日程提醒询问窗口同理：点头/摇头回答时暂停视线重评，避免弹窗被误关。
+  if (performance.now() < scheduleGazeGestureWindowUntil) return;
   if (activePage === 'music-page'
     && gazeTargetLocked
     && musicGazeTrackId
@@ -2609,6 +2648,12 @@ function bindEvents() {
   document.querySelectorAll('.voice-input').forEach((node) => node.addEventListener('click', () => {
     void toggleVoiceInput(node.dataset.target);
   }));
+  $('#voice-confirm').onclick = confirmVoiceText;
+  $('#voice-clear').onclick = () => {
+    const box = $('#voice-result');
+    if (box) box.value = '';
+    setAsrStatus('已清空语音识别结果。');
+  };
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
   $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
