@@ -133,9 +133,9 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .history-row { padding: 7px 0; border-top: 1px solid #e2e8f4; }
 .history-row span { display: block; }
 .history-row small { color: #8a97b0; }
-.schedule-item { border: 1px solid #e1e7f3; border-left: 4px solid #5975d7; border-radius: 10px; background: #fdfefe; transition: .16s ease; }
+.schedule-item { display: flex; align-items: center; border: 1px solid #e1e7f3; border-left: 4px solid #5975d7; border-radius: 10px; background: #fdfefe; transition: .16s ease; }
 .schedule-item:hover { border-color: #8ba2e5; }
-.schedule-check { display: grid; grid-template-columns: 22px 142px 1fr; column-gap: 8px; align-items: center; max-width: none; padding: 13px 15px; cursor: pointer; font-weight: 400; }
+.schedule-check { display: grid; flex: 1; grid-template-columns: 22px 142px 1fr; column-gap: 8px; align-items: center; max-width: none; padding: 13px 15px; cursor: pointer; font-weight: 400; }
 .schedule-check input { width: 17px; height: 17px; cursor: pointer; }
 .schedule-time { color: #4b63b4; font-weight: 700; }
 .schedule-title { font-weight: 700; }
@@ -145,7 +145,7 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .schedule-item.past .schedule-time, .schedule-item.past .schedule-meta, .schedule-item.past small { color: #8a93a2; }
 .schedule-item.completed { border-left-color: #55a77b; background: #f2faf5; }
 .schedule-item.completed .schedule-title, .schedule-item.completed .schedule-time { color: #5f7869; text-decoration: line-through; }
-.reminder-btn { margin: 0 12px 10px; padding: 5px 11px; border: 0; border-radius: 7px; cursor: pointer; color: #3a57ad; background: #e5ebfb; font: inherit; font-size: 12px; font-weight: 700; }
+.reminder-btn { flex: 0 0 auto; margin: 0 12px 0 0; padding: 6px 12px; border: 0; border-radius: 7px; cursor: pointer; color: #3a57ad; background: #e5ebfb; font: inherit; font-size: 12px; font-weight: 700; }
 .reminder-btn:hover { filter: brightness(0.97); }
 .reminder-btn[data-reminder-time] { color: #2f6f4e; background: #e3f4ea; }
 .reminder-offer { margin-top: 10px; padding: 10px 12px; border: 1px dashed #e1ad35; border-radius: 10px; background: #fffaf0; display: grid; gap: 8px; }

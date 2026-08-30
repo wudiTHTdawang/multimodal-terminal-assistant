@@ -58,6 +58,8 @@ let playbackTrackId;
 let playbackFeedbackRecorded = false;
 let playbackPaused = false;
 let pausedPlaybackRemainingMs = 0;
+// 因离开音乐页而暂停的标志：仅此类暂停在回到音乐页时自动恢复。
+let navPausedPlayback = false;
 let memoAuthorizationMode = 'merge';
 let authorizedSources = [];
 let activeProfileId;
@@ -76,6 +78,10 @@ const MUSIC_GAZE_MINIMUM_SCORE = 0.54;
 // 只在持续候选超过一个较长的间隔后才学习一次，避免把每帧检测噪声写入校准记录。
 const GAZE_CANDIDATE_REWARD_INTERVAL_MS = 600;
 const GAZE_CANDIDATE_ABANDON_MIN_MS = 260;
+// 视线触发操作后的冷却：同一卡片操作后的一段时间内不允许再次锁定（避免误触）。
+const GAZE_ACTION_COOLDOWN_MS = 2500;
+let gazeActionCooldownKey = null;
+let gazeActionCooldownUntil = 0;
 const HAND_GESTURE_INTERVAL_MS = 100;
 const HAND_GESTURE_DWELL_MS = 300;
 const HAND_GESTURE_CANDIDATE_GAP_MS = 300;
@@ -87,6 +93,9 @@ const PALM_TOGGLE_TRANSITION_WINDOW_MS = 1600;
 const HAND_GESTURE_COOLDOWN_MS = 450;
 const HAND_GESTURE_HEAD_SUPPRESS_MS = 900;
 const MUSIC_HEAD_GESTURE_WARMUP_MS = 420;
+// 上指/挥手切歌的间隔：避免手指持续上举或连续挥手导致误跳多首。
+const POINTING_SKIP_COOLDOWN_MS = 2500;
+let lastPointingSkipAt = 0;
 
 const FACE_TASK_VERSION = '1.0.1';
 // 模型与主脚本随项目发布，避免 Google Storage 或 CDN 被网络策略拦截后导致功能失效。
@@ -225,59 +234,64 @@ function startWebSpeechRecording(targetId) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const recognizer = new SpeechRecognition();
   recognizer.lang = 'zh-CN';
-  recognizer.interimResults = false;
+  recognizer.continuous = true;              // 持续聆听，直到用户点击「■ 停止录音」
+  recognizer.interimResults = true;          // 说话时实时显示中间结果
   recognizer.maxAlternatives = 1;
-  webSpeechSession = { recognizer, targetId, done: false };
+  webSpeechSession = { recognizer, targetId };
   setVoiceButtonsRecording(true);
-  setAsrStatus('正在聆听（浏览器语音识别）…点击「■ 停止录音」结束。');
+  setAsrStatus('正在聆听…（说话后点击「■ 停止录音」结束并识别）');
   recognizer.onresult = (event) => {
-    const text = (event.results[0]?.[0]?.transcript || '').trim();
-    if (!webSpeechSession?.done && text) {
-      webSpeechSession.done = true;
-      const target = webSpeechSession.targetId;
-      webSpeechSession = null;
-      setVoiceButtonsRecording(false);
-      setAsrStatus(`已识别：${text}。将提交给本地大模型理解后执行。`);
-      toast(`已识别：${text}`);
-      submitRecognizedText(target, text);
+    if (!webSpeechSession) return;
+    const last = event.results[event.results.length - 1];
+    const text = (last?.[0]?.transcript || '').trim();
+    if (last?.isFinal) {
+      if (text) {
+        const target = webSpeechSession.targetId;
+        webSpeechSession = null;
+        setVoiceButtonsRecording(false);
+        setAsrStatus(`已识别：${text}。将提交给本地大模型理解后执行。`);
+        toast(`已识别：${text}`);
+        submitRecognizedText(target, text);
+      } else {
+        setAsrStatus('未检测到语音内容，请对着麦克风再说一次。');
+      }
+    } else {
+      setAsrStatus(`正在聆听…「${text}」`);
     }
   };
   recognizer.onerror = (event) => {
-    if (webSpeechSession?.done) return;
+    if (!webSpeechSession) return;
     const error = event.error || 'unknown';
-    setVoiceButtonsRecording(false);
+    const target = webSpeechSession.targetId;
     webSpeechSession = null;
+    setVoiceButtonsRecording(false);
     if (['network', 'service-not-allowed', 'language-not-supported'].includes(error)) {
       setAsrStatus(`浏览器语音识别不可用（${error}），回退本地 Whisper（离线）。`);
-      void startAsrRecording(targetId);
+      void startAsrRecording(target);
     } else {
       setAsrStatus(`语音识别未成功：${error}。请再试一次。`);
     }
   };
   recognizer.onend = () => {
-    if (!webSpeechSession?.done) {
-      setVoiceButtonsRecording(false);
-      setAsrStatus('语音识别结束（未捕获到内容，可重试）。');
-    }
+    if (!webSpeechSession) return;
     webSpeechSession = null;
+    setVoiceButtonsRecording(false);
+    setAsrStatus('未检测到语音（语音识别已结束）。请点击「🎤」后说话，说完点「■ 停止录音」。');
   };
   try {
     recognizer.start();
   } catch (error) {
-    setVoiceButtonsRecording(false);
     webSpeechSession = null;
+    setVoiceButtonsRecording(false);
     setAsrStatus(`浏览器语音识别不可用：${error.message}；回退本地 Whisper。`);
     void startAsrRecording(targetId);
   }
 }
 
 function stopWebSpeech() {
+  // 触发 onresult 的最终结果或 onend；不在这里置空会话，交给回调收尾。
   if (!webSpeechSession) return;
-  const session = webSpeechSession;
-  session.done = true;
-  webSpeechSession = null;
-  try { session.recognizer.stop(); } catch { /* 已停止 */ }
-  setVoiceButtonsRecording(false);
+  try { webSpeechSession.recognizer.stop(); } catch { /* 已停止 */ }
 }
 
 async function startAsrRecording(targetId) {
@@ -962,6 +976,9 @@ async function lockGazeTarget(node, zone, confidence) {
     if (eventKey) showScheduleReminderPrompt(node, eventKey, label);
     else $('#gaze-feedback').textContent = `已持续注视：${label}。`;
   }
+  // 操作冷却：同一目标在本次视线操作后的一段时间内不再允许被立即再次锁定。
+  gazeActionCooldownKey = metadata.target_id;
+  gazeActionCooldownUntil = performance.now() + GAZE_ACTION_COOLDOWN_MS;
 }
 
 // ---- 视线锁定日程事项 → 提醒生成询问 ----
@@ -988,6 +1005,7 @@ function showScheduleReminderPrompt(node, eventKey, label) {
       const result = await api('create_reminder', { event_key: target.eventKey });
       toast(result.message);
       if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
+      clearGazeTarget(); // 重渲染后释放旧节点锁定，便于冷却结束后再次锁定
     } catch (error) { toast(error.message); }
   };
   prompt.querySelector('#schedule-prompt-decline').onclick = async () => {
@@ -998,6 +1016,7 @@ function showScheduleReminderPrompt(node, eventKey, label) {
       const result = await api('decline_reminder', { event_key: target.eventKey });
       toast(result.message);
       if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
+      clearGazeTarget();
     } catch (error) { toast(error.message); }
   };
 }
@@ -1139,6 +1158,9 @@ function updateGazeTarget(prediction) {
   }
   const { node: closest } = bestCandidate;
   const candidateMargin = bestCandidate.score - (secondCandidate?.score || 0);
+  // 操作冷却期内，同一目标不允许被再次锁定（避免刚操作完又立即触发）。
+  const candidateKey = closest.dataset.id || closest.dataset.trackId || closest.querySelector('[data-event-key]')?.dataset.eventKey;
+  if (candidateKey && candidateKey === gazeActionCooldownKey && now < gazeActionCooldownUntil) return;
   // 候选对象在相邻检测帧之间偶尔切换时，优先保留先前的候选一小段时间。
   // 这样用户持续看同一张卡片时，黄框不会频繁闪烁或把停留时间清零。
   if (gazeTargetElement && gazeTargetElement !== closest
@@ -1724,6 +1746,11 @@ function observeHandGesture(result, now) {
   const stableGesture = handGestureCandidate;
   handGestureCandidate = undefined;
   lastHandGestureAt = now;
+  if (stableGesture.gesture === 'Pointing_Up' && now - lastPointingSkipAt < POINTING_SKIP_COOLDOWN_MS) {
+    setHandGestureStatus(`切歌间隔未到，请 ${Math.ceil((POINTING_SKIP_COOLDOWN_MS - (now - lastPointingSkipAt)) / 1000)} 秒后再上指切歌。`);
+    return;
+  }
+  if (stableGesture.gesture === 'Pointing_Up') lastPointingSkipAt = now;
   void applyHandGesture(stableGesture.gesture, stableGesture.confidence).then((handled) => {
     setHandGestureStatus(handled
       ? `已通过手势处理：${stableGesture.gesture}。`
@@ -2021,6 +2048,7 @@ function stopDemoPlayback() {
   playbackTrackId = undefined;
   playbackPaused = false;
   pausedPlaybackRemainingMs = 0;
+  navPausedPlayback = false;
 }
 
 function updatePlaybackProgress() {
@@ -2037,6 +2065,7 @@ function updatePlaybackProgress() {
 
 function toggleDemoPlayback() {
   if (!currentTrack || !activeMode) return;
+  navPausedPlayback = false;
   if (playbackPaused) {
     playbackPaused = false;
     playbackDeadline = Date.now() + pausedPlaybackRemainingMs;
@@ -2053,6 +2082,28 @@ function toggleDemoPlayback() {
   $('#toggle-playback').textContent = '继续播放';
   updatePlaybackProgress();
   toast('已暂停播放。');
+}
+
+function pauseDemoPlayback() {
+  // 离开音乐页时暂停本地演示播放；回到音乐页且无其他操作时自动恢复。
+  if (!currentTrack || !activeMode || playbackPaused || !playbackTimer) return;
+  navPausedPlayback = true;
+  pausedPlaybackRemainingMs = Math.max(0, playbackDeadline - Date.now());
+  clearInterval(playbackTimer);
+  playbackTimer = undefined;
+  playbackPaused = true;
+  $('#toggle-playback').textContent = '继续播放';
+  updatePlaybackProgress();
+}
+
+function resumeDemoPlayback() {
+  if (!navPausedPlayback || !currentTrack || !activeMode || !playbackPaused) return;
+  navPausedPlayback = false;
+  playbackPaused = false;
+  playbackDeadline = Date.now() + pausedPlaybackRemainingMs;
+  pausedPlaybackRemainingMs = 0;
+  $('#toggle-playback').textContent = '暂停播放';
+  startDemoPlayback();
 }
 
 function startDemoPlayback() {
@@ -2483,13 +2534,19 @@ async function loadPageSuggestions(page) {
 function bindEvents() {
   document.querySelectorAll('.nav-button').forEach((node) => node.addEventListener('click', async () => {
     // 切换页面不停止音乐模式：模式只在显式“停止模式”、切换演示用户或刷新页面时结束。
+    // 离开音乐页时暂停本地演示播放，回到音乐页自动恢复。
     document.querySelectorAll('.nav-button, .page').forEach((item) => item.classList.remove('active'));
     node.classList.add('active');
     $(`#${node.dataset.page}-page`).classList.add('active');
     setCameraContext(node.textContent.trim());
     void recordScreenContext();
     void loadPageSuggestions(node.dataset.page);
-    if (node.dataset.page === 'music' && !activeMode) await activateGeneralMusic();
+    if (node.dataset.page === 'music') {
+      resumeDemoPlayback();
+      if (!activeMode) await activateGeneralMusic();
+    } else {
+      pauseDemoPlayback();
+    }
   }));
 
   $('#refresh-history').onclick = refreshHistory;
