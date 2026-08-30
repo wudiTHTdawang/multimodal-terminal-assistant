@@ -221,10 +221,10 @@ function webSpeechAvailable() {
 }
 
 function submitRecognizedText(targetId, text) {
-  // 语音识别结果先写入消息框，由用户确认后（「确认发送」）再交给后端大模型理解。
+  // 语音识别结果写入消息框：若已有内容则接在后面，不覆盖（便于连续补充再统一确认）。
   const box = $('#voice-result');
   if (box) {
-    box.value = text;
+    box.value = box.value.trim() ? `${box.value.trim()}，${text}` : text;
     box.focus();
   }
   setAsrStatus(`已识别：${text}。请确认后点击「确认发送」。`);
@@ -260,25 +260,28 @@ function startWebSpeechRecording(targetId) {
   recognizer.continuous = true;              // 持续聆听，直到用户点击「■ 停止录音」
   recognizer.interimResults = true;          // 说话时实时显示中间结果
   recognizer.maxAlternatives = 1;
-  const session = { recognizer, targetId, seq: ++webSpeechSeq };
+  const session = { recognizer, targetId, seq: ++webSpeechSeq, accumulated: '', processed: 0 };
   webSpeechSession = session;
   setVoiceButtonsRecording(true);
   setAsrStatus('正在聆听…（说话后点击「■ 停止录音」结束并识别）');
   recognizer.onresult = (event) => {
-    if (webSpeechSession !== session) return; // 防止上一会话迟到的回调污染当前会话
-    const last = event.results[event.results.length - 1];
-    const text = (last?.[0]?.transcript || '').trim();
-    if (last?.isFinal) {
-      webSpeechSession = null;
-      setVoiceButtonsRecording(false);
-      if (text) {
-        setAsrStatus(`已识别：${text}。请确认后点击「确认发送」。`);
-        submitRecognizedText(session.targetId, text);
+    if (webSpeechSession !== session) return;
+    // 持续聆听：把已确认(final)的段落累加，中间结果仅作实时预览；停止时才一次性提交。
+    let interim = '';
+    for (let i = session.processed; i < event.results.length; i++) {
+      const entry = event.results[i];
+      const part = (entry?.[0]?.transcript || '').trim();
+      if (entry?.isFinal) {
+        session.accumulated = session.accumulated ? `${session.accumulated}，${part}` : part;
+        session.processed = i + 1;
       } else {
-        setAsrStatus('未检测到语音内容，请对着麦克风再说一次。');
+        interim = part;
       }
-    } else {
-      setAsrStatus(`正在聆听…「${text}」`);
+    }
+    if (interim) {
+      setAsrStatus(`正在聆听…「${session.accumulated ? `${session.accumulated}，` : ''}${interim}」`);
+    } else if (session.accumulated) {
+      setAsrStatus(`已记录：${session.accumulated}。继续说或点「■ 停止录音」。`);
     }
   };
   recognizer.onerror = (event) => {
@@ -307,7 +310,13 @@ function startWebSpeechRecording(targetId) {
     if (webSpeechSession !== session) return;
     webSpeechSession = null;
     setVoiceButtonsRecording(false);
-    setAsrStatus('未检测到语音（语音识别已结束）。请点击「🎤」后说话，说完点「■ 停止录音」。');
+    const text = (session.accumulated || '').trim();
+    if (text) {
+      setAsrStatus(`已识别：${text}。请确认后点击「确认发送」。`);
+      submitRecognizedText(session.targetId, text);
+    } else {
+      setAsrStatus('未检测到语音。请点击「🎤」后说话，说完点「■ 停止录音」。');
+    }
   };
   try {
     recognizer.start();
@@ -918,6 +927,11 @@ async function submitSimulatedMusicCommand(source = 'mic', providedText) {
     }
     if (result.intent === 'next_track') {
       await nextTrack();
+      return;
+    }
+    if (result.intent === 'toggle_playback') {
+      toggleDemoPlayback();
+      toast(playbackPaused ? '已暂停播放。' : '已继续播放。');
       return;
     }
     // 后端已切换模式/播放/切歌：应用返回的曲目、模式与偏好歌单。
@@ -2291,11 +2305,15 @@ async function submitScheduleSimulatedSpeech(source = 'mic', providedText) {
       toast(result.message);
       return;
     }
-    if (!result.items) {
-      $('#memo-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong></div>`;
+    if (result.items) {
+      showSchedule(result);
       return;
     }
-    showSchedule(result);
+    // 无事项的指令（设置/取消提醒、拒绝等）：仅提示；若日程可见，则刷新其状态而非覆盖。
+    toast(result.message);
+    if (document.querySelector('#memo-result .schedule-box')) {
+      showSchedule(await api('query_schedule', { record_history: false }));
+    }
   } catch (error) { toast(error.message); }
 }
 

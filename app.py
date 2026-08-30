@@ -545,6 +545,8 @@ def parse_simulated_speech(text):
         return "like_track", "", ""
     if normalized in {"这首不喜欢", "这首歌不喜欢", "不喜欢这首", "不喜欢这首歌", "不喜欢这个", "这个不喜欢", "不喜欢", "不好听", "难听"}:
         return "dislike_track", "", ""
+    if normalized in {"暂停", "暂停播放", "暂停一下", "先暂停", "停一下", "继续", "继续播放", "接着播", "接着放", "恢复播放"}:
+        return "toggle_playback", "", ""
     if normalized in {"不", "不是", "不用", "暂不", "取消", "取消发送", "不要", "不要发送", "不发送"}:
         return "cancel", "", ""
     if normalized in {"是", "是的", "确认", "确认发送", "发送", "好的", "好", "确认发送消息"}:
@@ -609,17 +611,17 @@ def parse_simulated_speech(text):
     # “发消息给X，内容”：先于“给X发消息”处理。
     match = re.search(r"发消息给([\u4e00-\u9fa5A-Za-z0-9]{1,6})[，,、：:]?(.+)", normalized)
     if match:
-        content = re.sub(r"^(?:让他|让她|让它|告诉他|告诉她|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(2).strip())
+        content = re.sub(r"^(?:让他|叫她|让他|让她|让它|叫他|告诉她|告诉他|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(2).strip())
         return "send_message", content, match.group(1)
     # “给X发消息，正文”：提取联系人名（“他/她/它”不是联系人名，由视线/手动选择兜底）。
     # 正文去掉“让他/告诉她/跟他说/说”等祈使性插入语（例：“让他回来吃饭”→“回来吃饭”）。
     match = re.search(r"给([\u4e00-\u9fa5A-Za-z0-9]{1,6})(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match:
-        content = re.sub(r"^(?:让他|让她|让它|告诉他|告诉她|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(2).strip())
+        content = re.sub(r"^(?:让他|让她|让它|叫他|叫她|告诉她|告诉他|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(2).strip())
         return "send_message", content, match.group(1)
     match = re.search(r"(?:给他|给她|给它)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
-        content = re.sub(r"^(?:让他|让她|让它|告诉他|告诉她|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(1).strip())
+        content = re.sub(r"^(?:让他|让她|让它|叫他|叫她|告诉她|告诉他|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(1).strip())
         return "send_message", content, ""
     if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息", "发个消息")):
         return "send_message", "", ""
@@ -739,7 +741,8 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
     page_intents = {
         "message": {"send_message", "confirm", "cancel"},
         "music": {"next_track", "cancel_music_selection", "like_track", "dislike_track",
-                  "start_focus", "play_music", "offer_start_focus", "stop_mode", "confirm", "cancel"},
+                  "start_focus", "play_music", "offer_start_focus", "stop_mode", "toggle_playback",
+                  "confirm", "cancel"},
         "memo": {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all",
                  "query_priority", "query_date_plan", "analyze_schedule_pressure",
                  "decline_reminder", "update_reminder_preference", "request_edit_memo",
@@ -853,9 +856,11 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         gaze = None
     if spoken_contact:
         contact = spoken_contact
+        contact_source = "speech"
         target_explanation = f"本轮优先使用语音中明确说出的联系人：{contact['name']}。"
     elif manual_contact:
         contact = manual_contact
+        contact_source = "manual"
         target_explanation = f"本轮优先使用手动选中的联系人：{contact['name']}。"
     elif gaze:
         contact = find_contact(gaze["payload"].get("target_id"))
@@ -874,6 +879,7 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         }
         if visible_ids and contact["id"] not in visible_ids:
             return {"message": "联系人页面已变化，请重新注视后再试。", "intent": intent, "needs_clarification": True, "explanation": ["屏幕上下文中不包含该注视联系人。"]}
+        contact_source = "gaze"
         target_explanation = f"在语音前后 4 秒内检测到对{contact['name']}的稳定注视（{gaze['payload']['dwell_ms']}ms，置信度 {gaze['confidence']}）"
     else:
         contact = find_contact(state.get("selected_contact"))
@@ -882,12 +888,19 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
             if low_gaze_confidence:
                 explanation.append("检测到视线事件但置信度不足，按安全原则不直接采用。")
             return {"message": "请先注视确认或手动点击需要联系的联系人，再提交模拟语音。", "intent": intent, "needs_clarification": True, "explanation": explanation}
+        contact_source = "history"
         target_explanation = f"未使用有效视线事件，改用手动选中的联系人：{contact['name']}。"
 
     pending = {"contact": contact["name"], "contact_id": contact["id"], "content": content}
     state["selected_contact"] = contact["id"]
     state["pending_message"] = pending
     save_state(state)
+    source_note = {
+        "speech": f"语音中明确说出「{contact['name']}」，无需借助视线推断“他”。",
+        "gaze": "当前屏幕上下文为联系人页面，因此将“他”解析为该联系人。",
+        "manual": f"采用手动选中的联系人「{contact['name']}」。",
+        "history": f"采用此前已选择的联系人「{contact['name']}」。",
+    }.get(contact_source, "")
     return {
         "message": f"将通过常用消息应用向{contact['name']}发送：‘{content}’，是否确认？",
         "intent": intent,
@@ -895,7 +908,7 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         "explanation": [
             f"识别到模拟语音：{speech['payload']['text']}",
             target_explanation,
-            "当前屏幕上下文为联系人页面，因此将“他”解析为该联系人。",
+            source_note,
         ],
     }
 
@@ -911,6 +924,7 @@ SPEECH_HISTORY_ACTIONS = {
     "cancel_music_selection": "cancel_music_selection",
     "like_track": "like_track",
     "dislike_track": "dislike_track",
+    "toggle_playback": "toggle_playback",
     "start_focus": "start_mode",
     "stop_mode": "stop_mode",
     "play_music": "play_music",
@@ -1335,6 +1349,13 @@ def understand_music_command(state, intent, content, speech, events, current_tra
             "message": "已停止当前音乐模式。",
             "intent": intent,
             "explanation": ["识别到停止模式指令。"],
+        }
+    if intent == "toggle_playback":
+        # 播放状态由前端持有：后端确认指令，前端执行暂停/继续切换。
+        return {
+            "message": "已收到播放控制指令（暂停 / 继续）。",
+            "intent": intent,
+            "explanation": ["识别到播放控制指令，由前端切换演示播放状态。"],
         }
     if intent == "start_focus":
         state["active_mode"] = "focus"
