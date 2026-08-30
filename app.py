@@ -579,19 +579,48 @@ def parse_simulated_speech(text):
         return "start_focus", "", ""
     if normalized == "播放学习音乐":
         return "offer_start_focus", "", ""
+    # “播放下一首/下一曲”是切歌，不是播放一首叫“下一首”的歌。
+    if "下一" in normalized and ("播放" in normalized or "切" in normalized or "换" in normalized or normalized in {"下一首", "下一曲", "下一首歌"}):
+        return "next_track", "", ""
     if normalized in {"播放这个", "播放这首", "播放"}:
         return "play_music", "", ""
     match = re.search(r"播放([\u4e00-\u9fa5A-Za-z0-9-]{1,12})", normalized)
     if match:
         return "play_music", match.group(1), ""
-    # “给X发消息，正文”：提取联系人名（“他/她/它”不是联系人名，由视线/手动选择兜底）
+    # “给X发消息，正文”：提取联系人名（“他/她/它”不是联系人名，由视线/手动选择兜底）。
+    # 正文去掉“让他/告诉她/跟他说/说”等祈使性插入语（例：“让他回来吃饭”→“回来吃饭”）。
     match = re.search(r"给([\u4e00-\u9fa5A-Za-z0-9]{1,6})(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match:
-        return "send_message", match.group(2).strip(), match.group(1)
+        content = re.sub(r"^(?:让他|让她|让它|告诉他|告诉她|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(2).strip())
+        return "send_message", content, match.group(1)
     match = re.search(r"(?:给他|给她|给它)(?:发消息|发送消息|发信息|发送信息)[，,、：:]?(.+)", normalized)
     if match and match.group(1).strip():
-        return "send_message", match.group(1).strip(), ""
-    if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息")):
+        content = re.sub(r"^(?:让他|让她|让它|告诉他|告诉她|跟他说|跟她说|给他说|说|请|帮我|麻烦)", "", match.group(1).strip())
+        return "send_message", content, ""
+    if any(word in normalized for word in ("发消息", "发送消息", "发信息", "发送信息", "发个消息")):
+        return "send_message", "", ""
+    # 模糊关键词兜底：容忍语音识别的近音/漏字（如“所以”≈“所有”），贴近系统已有操作。
+    if any(word in normalized for word in ("日程", "安排")):
+        if "明天" in normalized:
+            return "query_schedule_tomorrow", "", ""
+        if "后天" in normalized:
+            return "query_date_plan", "", ""
+        if "今天" in normalized:
+            return "query_schedule_today", "", ""
+        return "query_schedule_all", "", ""
+    if "明天" in normalized:
+        return "query_schedule_tomorrow", "", ""
+    if "今天" in normalized:
+        return "query_schedule_today", "", ""
+    if any(word in normalized for word in ("下一", "切歌", "换歌")):
+        return "next_track", "", ""
+    if any(word in normalized for word in ("不喜欢", "难听", "不好听", "换一首")):
+        return "dislike_track", "", ""
+    if any(word in normalized for word in ("喜欢", "点赞", "收藏", "好歌")):
+        return "like_track", "", ""
+    if any(word in normalized for word in ("专注", "学习", "自习")):
+        return "start_focus", "", ""
+    if any(word in normalized for word in ("发消息", "发送", "发信息", "发个消息")):
         return "send_message", "", ""
     return "unknown", "", ""
 
@@ -728,7 +757,11 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         return result
 
     if intent != "send_message":
-        return {"message": "暂未理解该模拟语音。可尝试“给他发消息，晚点开会”。", "intent": "unknown", "explanation": ["未匹配到当前支持的消息指令。"]}
+        return {
+            "message": f"暂未理解“{speech['payload'].get('text', '')}”。可尝试：给他发消息，内容 / 下一首 / 我喜欢这首 / 我明天有什么安排 / 查看所有日程。",
+            "intent": "unknown",
+            "explanation": ["未匹配到当前支持的指令，请换一种说法后重试。"],
+        }
     if not content:
         return {"message": "请补充需要发送的消息内容。", "intent": intent, "needs_clarification": True, "explanation": ["识别到发送消息意图，但缺少消息正文。"]}
 

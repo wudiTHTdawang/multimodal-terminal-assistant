@@ -2646,7 +2646,9 @@ function bindEvents() {
     }
   };
   document.querySelectorAll('.voice-input').forEach((node) => node.addEventListener('click', () => {
-    void toggleVoiceInput(node.dataset.target);
+    // 侧边栏共用一个语音按钮：按当前激活页面决定指令路由。
+    const page = document.querySelector('.page.active')?.id.replace('-page', '') || 'message';
+    void toggleVoiceInput(page);
   }));
   $('#voice-confirm').onclick = confirmVoiceText;
   $('#voice-clear').onclick = () => {

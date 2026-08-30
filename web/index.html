@@ -55,6 +55,7 @@
           <label for="voice-result">语音识别结果（确认后发送）</label>
           <textarea id="voice-result" placeholder="语音识别到的文字会显示在这里，可修改后点击「确认发送」交给系统理解执行。"></textarea>
           <div class="voice-result-actions">
+            <button class="voice-input" data-target="current">🎤 语音输入</button>
             <button class="primary" id="voice-confirm">确认发送</button>
             <button class="secondary" id="voice-clear">清空</button>
           </div>
@@ -81,10 +82,7 @@
         <h2>给他发消息</h2>
         <p>页面右上角的全局摄像头可在一次授权后被消息、音乐和日程三个模块共用。第一阶段仅展示预览；下一阶段将把画面中的注视方向与当前页面内容对应。当前仍可点击联系人卡片作为备用演示输入。</p>
         <div class="card-grid" id="contacts"></div>
-        <p class="voice-only-note">语音输入：点击下方「🎤 语音输入」，说一句话，浏览器本地识别后交由系统理解执行（文本模拟输入已移除）。</p>
-        <div class="speech-presets">
-          <button class="voice-input" data-target="message">🎤 语音输入</button>
-        </div>
+        <p class="voice-only-note">语音输入：使用左侧栏的「🎤 语音输入」按钮，说一句话，浏览器识别后写入左侧结果框，确认后交由系统理解执行。</p>
         <div class="result" id="message-result"></div>
       </section>
 
@@ -96,10 +94,7 @@
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
         <div class="result" id="music-result"></div>
-        <p class="voice-only-note">语音输入：点击「🎤 语音输入」说话即可（如"我喜欢这首""下一首""开始专注"）。</p>
-        <div class="speech-presets">
-          <button class="voice-input" data-target="music">🎤 语音输入</button>
-        </div>
+        <p class="voice-only-note">语音输入：使用左侧栏「🎤 语音输入」（如"播放下一首""我喜欢这首""开始专注"）。</p>
       </section>
 
       <section class="page" id="memo-page">
@@ -114,10 +109,7 @@
         </div>
         <p class="authorization-status" id="authorization-status">尚未选择授权备忘录文件。</p>
         <div class="authorized-file-list" id="authorized-files"></div>
-        <p class="voice-only-note">语音输入：点击「🎤 语音输入」说话即可（如"我明天有什么安排""后天有什么安排"）。</p>
-        <div class="speech-presets">
-          <button class="voice-input" data-target="memo">🎤 语音输入</button>
-        </div>
+        <p class="voice-only-note">语音输入：使用左侧栏「🎤 语音输入」（如"我明天有什么安排""查看所有已授权日程"）。</p>
         <button class="primary" id="query-schedule">查看所有已授权日程</button>
         <div class="result" id="memo-result"></div>
       </section>
