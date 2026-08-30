@@ -172,17 +172,16 @@ async function getAsrPipeline() {
   asrLoading = (async () => {
     setAsrStatus('正在加载本地语音识别模型（约 45MB，首次约需数十秒）…');
     if (!window.__asr?.pipeline) {
-      throw new Error('语音识别运行时未加载（window.__asr 缺失）。请用 Chrome/Edge 并硬刷新页面（Ctrl+F5）；若仍失败请查看浏览器控制台。');
+      throw new Error('本地语音识别运行时未加载。请用 Chrome/Edge 并硬刷新（Ctrl+F5）；若仍失败请查看浏览器控制台。');
     }
     const { pipeline, env } = window.__asr;
-    env.allowRemoteModels = false;                                    // 完全离线，不访问任何远端
+    env.allowRemoteModels = false;                                    // 禁止访问远端
+    env.allowLocalModels = true;                                      // 显式允许本地模型（v3 必需）
     env.localModelPath = '/models/';                                  // 模型随项目本地发布
     env.backends.onnx = env.backends.onnx || {};
     env.backends.onnx.wasm = env.backends.onnx.wasm || {};
     env.backends.onnx.wasm.wasmPaths = '/vendor/transformers/';       // WASM 运行时本地发布
-    asrPipeline = await pipeline('automatic-speech-recognition', 'whisper-tiny', {
-      quantized: true,
-    });
+    asrPipeline = await pipeline('automatic-speech-recognition', 'whisper-tiny', { quantized: true });
     setAsrStatus('本地语音识别已就绪（Whisper 量化模型，音频在浏览器内处理，不上传）。');
     return asrPipeline;
   })();
@@ -202,6 +201,83 @@ function setVoiceButtonsRecording(recording) {
   });
   const status = $('#asr-status');
   if (status) status.classList.toggle('recording', recording);
+}
+
+// ---- 语音输入：优先浏览器内置 Web Speech（Chrome/Edge 即开即用，参考 Hzp_back_03 设计），
+//      不可用或出错时回退本地 Whisper（离线、音频不出本机）。----
+let webSpeechSession = null; // { recognizer, targetId, done }
+
+function webSpeechAvailable() {
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function submitRecognizedText(targetId, text) {
+  const submitByTarget = {
+    'message': (recognized) => submitSimulatedSpeech('mic', recognized),
+    'music': (recognized) => submitSimulatedMusicCommand('mic', recognized),
+    'memo': (recognized) => submitScheduleSimulatedSpeech('mic', recognized),
+  };
+  const submit = submitByTarget[targetId];
+  if (submit) window.setTimeout(() => submit(text), 300);
+}
+
+function startWebSpeechRecording(targetId) {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recognizer = new SpeechRecognition();
+  recognizer.lang = 'zh-CN';
+  recognizer.interimResults = false;
+  recognizer.maxAlternatives = 1;
+  webSpeechSession = { recognizer, targetId, done: false };
+  setVoiceButtonsRecording(true);
+  setAsrStatus('正在聆听（浏览器语音识别）…点击「■ 停止录音」结束。');
+  recognizer.onresult = (event) => {
+    const text = (event.results[0]?.[0]?.transcript || '').trim();
+    if (!webSpeechSession?.done && text) {
+      webSpeechSession.done = true;
+      const target = webSpeechSession.targetId;
+      webSpeechSession = null;
+      setVoiceButtonsRecording(false);
+      setAsrStatus(`已识别：${text}。将提交给本地大模型理解后执行。`);
+      toast(`已识别：${text}`);
+      submitRecognizedText(target, text);
+    }
+  };
+  recognizer.onerror = (event) => {
+    if (webSpeechSession?.done) return;
+    const error = event.error || 'unknown';
+    setVoiceButtonsRecording(false);
+    webSpeechSession = null;
+    if (['network', 'service-not-allowed', 'language-not-supported'].includes(error)) {
+      setAsrStatus(`浏览器语音识别不可用（${error}），回退本地 Whisper（离线）。`);
+      void startAsrRecording(targetId);
+    } else {
+      setAsrStatus(`语音识别未成功：${error}。请再试一次。`);
+    }
+  };
+  recognizer.onend = () => {
+    if (!webSpeechSession?.done) {
+      setVoiceButtonsRecording(false);
+      setAsrStatus('语音识别结束（未捕获到内容，可重试）。');
+    }
+    webSpeechSession = null;
+  };
+  try {
+    recognizer.start();
+  } catch (error) {
+    setVoiceButtonsRecording(false);
+    webSpeechSession = null;
+    setAsrStatus(`浏览器语音识别不可用：${error.message}；回退本地 Whisper。`);
+    void startAsrRecording(targetId);
+  }
+}
+
+function stopWebSpeech() {
+  if (!webSpeechSession) return;
+  const session = webSpeechSession;
+  session.done = true;
+  webSpeechSession = null;
+  try { session.recognizer.stop(); } catch { /* 已停止 */ }
+  setVoiceButtonsRecording(false);
 }
 
 async function startAsrRecording(targetId) {
@@ -251,14 +327,7 @@ async function stopAsrRecording() {
     }
     setAsrStatus(`已识别：${text}。将提交给本地大模型理解后执行。`);
     toast(`已识别：${text}`);
-    // 语音文本自动提交：source=mic 时后端会先让本地大模型整理成规范指令，规则再做最终裁决。
-    const submitByTarget = {
-      'message': (recognized) => submitSimulatedSpeech('mic', recognized),
-      'music': (recognized) => submitSimulatedMusicCommand('mic', recognized),
-      'memo': (recognized) => submitScheduleSimulatedSpeech('mic', recognized),
-    };
-    const submit = submitByTarget[targetId];
-    if (submit) window.setTimeout(() => submit(text), 350);
+    submitRecognizedText(targetId, text);
   } catch (error) {
     setAsrStatus(`识别失败：${error.message || error}（可刷新页面重试，或查看浏览器控制台）`);
     toast(`识别失败：${error.message || error}`);
@@ -267,10 +336,9 @@ async function stopAsrRecording() {
 
 async function toggleVoiceInput(targetId) {
   try {
-    if (asrRecorder) {
-      await stopAsrRecording();
-      return;
-    }
+    if (webSpeechSession) { stopWebSpeech(); return; }
+    if (asrRecorder) { await stopAsrRecording(); return; }
+    if (webSpeechAvailable()) { startWebSpeechRecording(targetId); return; }
     await startAsrRecording(targetId);
   } catch (error) {
     setAsrStatus(`麦克风不可用：${error.message || error}（请允许麦克风权限后重试）`);
@@ -583,6 +651,20 @@ function musicCardGazeScore(node, prediction) {
   if (distance > tolerance) return 0;
   const spatialMatch = 1 - distance / tolerance;
   return 0.62 + spatialMatch * 0.30 + prediction.confidence * 0.08;
+}
+
+function scheduleItemGazeScore(node, prediction) {
+  // 日程行较高且信息密集：以注视点与行矩形的距离精确打分，
+  // 容差约为行高，避免相邻行互相抢锁。
+  if (!prediction.point) return 0;
+  const rect = node.getBoundingClientRect();
+  const x = prediction.point.x * window.innerWidth;
+  const y = prediction.point.y * window.innerHeight;
+  const distance = distanceToRect({ x, y }, rect);
+  const tolerance = Math.max(22, Math.min(56, rect.height * 0.85));
+  if (distance > tolerance) return 0;
+  const spatialMatch = 1 - distance / tolerance;
+  return 0.55 + spatialMatch * 0.40 + prediction.confidence * 0.05;
 }
 
 function targetMetadata(node) {
@@ -1035,14 +1117,17 @@ function updateGazeTarget(prediction) {
   if (!prediction || calibrationActive || pendingGazeSuggestion) return;
   const { zone, confidence, zoneScores } = prediction;
   const strictMusicGaze = activePage === 'music-page';
+  const schedulePage = activePage === 'memo-page';
+  // 日程页改用“注视点与行矩形的实际距离”评分，代替按区域粗评，提升逐行选择精度。
   const rankedCandidates = eligibleGazeElements().map((node) => ({
     node,
     zone: elementZone(node),
-    score: strictMusicGaze ? musicCardGazeScore(node, prediction) : gazeTargetScore(node, prediction),
+    score: strictMusicGaze ? musicCardGazeScore(node, prediction)
+      : schedulePage ? scheduleItemGazeScore(node, prediction) : gazeTargetScore(node, prediction),
   })).sort((left, right) => right.score - left.score);
   const bestCandidate = rankedCandidates[0];
   const secondCandidate = rankedCandidates[1];
-  const minimumScore = strictMusicGaze ? MUSIC_GAZE_MINIMUM_SCORE : 0.16;
+  const minimumScore = strictMusicGaze ? MUSIC_GAZE_MINIMUM_SCORE : schedulePage ? 0.5 : 0.16;
   const now = performance.now();
   if (!bestCandidate || bestCandidate.score < minimumScore) {
     // 单帧落点短暂跑出卡片范围时保留当前黄色框，而不是立刻清除并重新计时。
@@ -1122,11 +1207,8 @@ function headGestureHasTarget() {
 }
 
 function reminderOfferActive() {
-  // 日程页提醒建议（首个 offer）或视线锁定日程项后的提醒询问
-  return Boolean(
-    ($('#accept-reminder') && $('#accept-reminder').isConnected)
-    || ($('#schedule-prompt-accept') && $('#schedule-prompt-accept').isConnected)
-  );
+  // 视线锁定日程事项后的“是否需要提醒”询问弹窗
+  return Boolean($('#schedule-prompt-accept') && $('#schedule-prompt-accept').isConnected);
 }
 
 function modeDecisionActive() {
@@ -1135,16 +1217,12 @@ function modeDecisionActive() {
 
 async function acceptReminderOffer(motionStrength) {
   await recordHeadDecision('confirm', 'reminder_offer', 'memo', motionStrength);
-  const promptButton = $('#schedule-prompt-accept');
-  if (promptButton && promptButton.isConnected) { promptButton.click(); return; }
-  $('#accept-reminder')?.click();
+  $('#schedule-prompt-accept')?.click();
 }
 
 async function declineReminderOffer(motionStrength) {
   await recordHeadDecision('reject', 'reminder_offer', 'memo', motionStrength);
-  const promptButton = $('#schedule-prompt-decline');
-  if (promptButton && promptButton.isConnected) { promptButton.click(); return; }
-  $('#decline-reminder')?.click();
+  $('#schedule-prompt-decline')?.click();
 }
 
 async function confirmModeSwitch(motionStrength) {
@@ -2108,6 +2186,7 @@ function showSchedule(result) {
         <span class="schedule-meta">${item.location} · ${item.priority} 优先级${item.is_past ? ' · 已过时间' : ''}</span>
         <small>${item.content || '无补充说明'}</small>
       </label>
+      ${item.is_past ? '' : `<button class="secondary reminder-btn" data-event-key="${item.event_key}" data-reminder-time="${item.reminder_time || ''}">${item.reminder_time ? `已设置 ${item.reminder_time.slice(11)}` : '⏰ 设置提醒'}</button>`}
     </article>`).join('');
   const fusionNote = fusionSummary(result);
   const llmMessage = result.llm?.used && result.message
@@ -2115,15 +2194,7 @@ function showSchedule(result) {
   const llmReasons = (result.explanation || [])
     .filter((item) => item.startsWith('本地大模型'))
     .map((item) => `<small class="fusion-note">${escapeHtml(item)}</small>`).join('');
-  const offers = result.reminder_offers || (result.reminder_offer ? [result.reminder_offer] : []);
-  const offerHtml = offers.map((offer, index) => {
-    if (offer.already_set) {
-      return `<div class="reminder-offer"><strong>提醒</strong><p>已设置 <b>${escapeHtml(offer.remind_time)}</b> 的「${escapeHtml(offer.title)}」提醒。</p></div>`;
-    }
-    const first = index === 0;
-    return `<div class="reminder-offer" data-offer-index="${index}"><strong>提醒建议</strong><p>需要我在 <b>${escapeHtml(offer.remind_time)}</b> 提醒你参加「${escapeHtml(offer.title)}」吗？${offer.due_now ? '<small>（提醒时间已到，可立即提醒）</small>' : ''}</p><button class="secondary" ${first ? 'id="accept-reminder"' : `data-accept="${index}"`}>提醒我</button><button class="secondary" ${first ? 'id="decline-reminder"' : `data-decline="${index}"`}>不要</button></div>`;
-  }).join('');
-  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${llmMessage}${llmReasons}${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${offerHtml}${items}</div>`;
+  $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${llmMessage}${llmReasons}${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${items}</div>`;
   document.querySelectorAll('[data-event-key]').forEach((checkbox) => {
     checkbox.addEventListener('change', async () => {
       try {
@@ -2135,25 +2206,19 @@ function showSchedule(result) {
       }
     });
   });
-  offers.forEach((offer, index) => {
-    if (offer.already_set) return;
-    const accept = index === 0 ? $('#accept-reminder') : document.querySelector(`[data-accept="${index}"]`);
-    const decline = index === 0 ? $('#decline-reminder') : document.querySelector(`[data-decline="${index}"]`);
-    if (accept) accept.onclick = async () => {
+  // 每个日程项的“设置提醒 / 已设置”按钮：由用户自行选择哪些事项需要提醒（不再自动弹出建议）。
+  document.querySelectorAll('.reminder-btn').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const eventKey = button.dataset.eventKey;
       try {
-        const reminderResult = await api('create_reminder', { event_key: offer.event_key });
-        toast(reminderResult.message);
+        if (button.dataset.reminderTime) {
+          await api('remove_reminder', { event_key: eventKey });
+        } else {
+          await api('create_reminder', { event_key: eventKey });
+        }
         showSchedule(await api('query_schedule', { record_history: false }));
       } catch (error) { toast(error.message); }
-    };
-    if (decline) decline.onclick = async () => {
-      try {
-        const reminderResult = await api('decline_reminder', { event_key: offer.event_key });
-        toast(reminderResult.message);
-        // 拒绝后该事项的提醒建议立即消失；不改长期偏好，其他事项仍可单独建议。
-        document.querySelectorAll(`[data-offer-index="${index}"]`).forEach((node) => node.remove());
-      } catch (error) { toast(error.message); }
-    };
+    });
   });
   void recordScreenContext();
 }

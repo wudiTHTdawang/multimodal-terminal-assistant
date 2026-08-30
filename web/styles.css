@@ -145,6 +145,9 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .schedule-item.past .schedule-time, .schedule-item.past .schedule-meta, .schedule-item.past small { color: #8a93a2; }
 .schedule-item.completed { border-left-color: #55a77b; background: #f2faf5; }
 .schedule-item.completed .schedule-title, .schedule-item.completed .schedule-time { color: #5f7869; text-decoration: line-through; }
+.reminder-btn { margin: 0 12px 10px; padding: 5px 11px; border: 0; border-radius: 7px; cursor: pointer; color: #3a57ad; background: #e5ebfb; font: inherit; font-size: 12px; font-weight: 700; }
+.reminder-btn:hover { filter: brightness(0.97); }
+.reminder-btn[data-reminder-time] { color: #2f6f4e; background: #e3f4ea; }
 .reminder-offer { margin-top: 10px; padding: 10px 12px; border: 1px dashed #e1ad35; border-radius: 10px; background: #fffaf0; display: grid; gap: 8px; }
 .reminder-offer p { margin: 0; font-size: 13px; line-height: 1.55; }
 .reminder-offer small { color: #9a7b2d; }

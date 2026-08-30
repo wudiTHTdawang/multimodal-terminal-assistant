@@ -365,6 +365,10 @@ def undo_last_nontext_operation(state):
         declined = state.setdefault("declined_reminder_offers", [])
         state["declined_reminder_offers"] = [key for key in declined if key != item.get("event_key")]
         message = "已撤销“不用提醒”，该事项的提醒建议将再次给出。"
+    elif kind == "restore_reminder":
+        # 撤销“取消提醒”：恢复被移除的提醒记录。
+        state.setdefault("reminders", []).append(item["reminder"])
+        message = f"已恢复 {item['reminder'].get('time')} 的提醒。"
     else:
         raise ValueError("该操作已不能安全撤销。")
 
@@ -1015,12 +1019,14 @@ def is_past_event(memo):
 
 def schedule_items(state):
     completed = set(state.get("completed_events", []))
+    reminder_by_key = {reminder.get("event_key"): reminder.get("time") for reminder in state.get("reminders", [])}
     items = []
     for memo in authorized_memos(state):
         item = dict(memo)
         item["event_key"] = schedule_event_key(item)
         item["is_completed"] = item["event_key"] in completed
         item["is_past"] = is_past_event(item)
+        item["reminder_time"] = reminder_by_key.get(item["event_key"])
         items.append(item)
     return sorted(items, key=lambda item: (item.get("date", "9999-99-99"), item.get("time", "99:99")))
 
@@ -1770,6 +1776,19 @@ class AssistantHandler(SimpleHTTPRequestHandler):
                 message = f"已在本项目内创建 {remind_time} 的「{item['title']}」提醒。"
             save_state(state)
             return {"message": message, "reminders": state["reminders"]}
+
+        if action == "remove_reminder":
+            # 手动取消某事项的提醒（对应日程项上的“已设置提醒”按钮）。
+            event_key = str(payload.get("event_key", ""))
+            reminders = state.setdefault("reminders", [])
+            removed = [reminder for reminder in reminders if reminder.get("event_key") == event_key]
+            if not removed:
+                raise ValueError("该事项没有已设置的提醒。")
+            state["reminders"] = [reminder for reminder in reminders if reminder.get("event_key") != event_key]
+            append_interaction_history(state, page="memo", action="remove_reminder", modality="ui")
+            push_undo(state, {"kind": "restore_reminder", "page": "memo", "reminder": removed[0]})
+            save_state(state)
+            return {"message": "已取消该事项的提醒。", "reminders": state["reminders"]}
 
         if action == "decline_reminder":
             # 记录本次拒绝：同一事项的提醒建议不再重复弹出；该拒绝可撤销。
