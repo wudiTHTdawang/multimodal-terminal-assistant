@@ -561,16 +561,16 @@ def parse_simulated_speech(text):
         return "update_reminder_preference", "", ""
     if "修改" in normalized:
         return "request_edit_memo", "", ""
-    # 语音设置/取消提醒：给X设置提醒 / 提醒我X / 取消X提醒
+    # 语音设置/取消提醒：给X设置提醒 / 提醒我X / 取消X提醒（容错“的/一个”等语气助词）
     match = re.search(r"(?:给|为|帮)([\u4e00-\u9fa5A-Za-z0-9]{1,10})(?:设置|定个|添加)(?:一个)?提醒", normalized)
     if match:
-        return "set_reminder", match.group(1), ""
+        return "set_reminder", match.group(1).rstrip("的"), ""
     match = re.search(r"提醒我([\u4e00-\u9fa5A-Za-z0-9]{1,10})", normalized)
     if match:
-        return "set_reminder", match.group(1), ""
-    match = re.search(r"(?:取消|删除|去掉)([\u4e00-\u9fa5A-Za-z0-9]{1,10})提醒", normalized)
+        return "set_reminder", match.group(1).rstrip("的"), ""
+    match = re.search(r"(?:取消|删除|去掉)([\u4e00-\u9fa5A-Za-z0-9]{1,10})(?:的)?提醒", normalized)
     if match:
-        return "unset_reminder", match.group(1), ""
+        return "unset_reminder", match.group(1).rstrip("的"), ""
     # 日程：优先级与日期查询
     if "优先" in normalized or "重要" in normalized:
         return "query_priority", "", ""
@@ -765,7 +765,8 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         }
     if intent in {"set_reminder", "unset_reminder"}:
         candidates = [item for item in schedule_items(state)
-                      if item.get("title") == content or (content and content in item.get("title", ""))]
+                      if item.get("title") == content
+                      or (content and (content in item.get("title", "") or item.get("title", "") in content))]
         if not candidates:
             return {
                 "message": f"未找到事项“{content}”，请确认名称后再试。",

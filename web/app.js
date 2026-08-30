@@ -658,7 +658,9 @@ function penalizeAbandonedGazeCandidate(now) {
 
 function eligibleGazeElements() {
   const activePage = document.querySelector('.page.active')?.id;
-  const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.music-track-card' : '.schedule-item';
+  // 日程页不参与视线目标：避免黄色锁定框干扰浏览，提醒通过右侧按钮或语音设置。
+  const selector = activePage === 'message-page' ? '.contact' : activePage === 'music-page' ? '.music-track-card' : null;
+  if (!selector) return [];
   return [...document.querySelectorAll(selector)].filter((node) => {
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 && !node.closest('.muted');
