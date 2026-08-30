@@ -1890,6 +1890,9 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             elif scope == "tomorrow":
                 tomorrow = (demo_reference_date() + timedelta(days=1)).strftime("%Y-%m-%d")
                 result = schedule_query_result(state, tomorrow, f"明天（{tomorrow}）日程")
+            elif scope == "day_after":
+                day_after = (demo_reference_date() + timedelta(days=2)).strftime("%Y-%m-%d")
+                result = schedule_query_result(state, day_after, f"后天（{day_after}）日程")
             else:
                 result = schedule_query_result(state)
             # 默认记录「查看日程」；切换完成状态后的内部刷新不重复记入历史。

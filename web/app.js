@@ -2245,7 +2245,7 @@ function showSchedule(result) {
     checkbox.addEventListener('change', async () => {
       try {
         await api('toggle_event_completion', { event_key: checkbox.dataset.eventKey, completed: checkbox.checked });
-        showSchedule(await api('query_schedule', { record_history: false }));
+        await refreshScheduleView();
       } catch (error) {
         toast(error.message);
         checkbox.checked = !checkbox.checked;
@@ -2262,11 +2262,20 @@ function showSchedule(result) {
         } else {
           await api('create_reminder', { event_key: eventKey });
         }
-        showSchedule(await api('query_schedule', { record_history: false }));
+        await refreshScheduleView();
       } catch (error) { toast(error.message); }
     });
   });
   void recordScreenContext();
+}
+
+// 记住最近一次日程查询参数，用于“原位刷新”（设置提醒/勾选完成等动作不切换视图）。
+let currentScheduleQuery = null;
+
+async function refreshScheduleView() {
+  if (!currentScheduleQuery) return;
+  const payload = { record_history: false, ...currentScheduleQuery };
+  showSchedule(await api('query_schedule', payload));
 }
 
 function readTextFile(file) {
@@ -2308,14 +2317,14 @@ async function submitScheduleSimulatedSpeech(source = 'mic', providedText) {
       return;
     }
     if (result.items) {
+      // 记录当前视图的查询参数，供“原位刷新”使用（设置提醒等动作不切换视图）。
+      currentScheduleQuery = { scope: { query_schedule_today: 'today', query_schedule_tomorrow: 'tomorrow', query_date_plan: 'day_after' }[result.intent] || 'all' };
       showSchedule(result);
       return;
     }
-    // 无事项的指令（设置/取消提醒、拒绝等）：仅提示；若日程可见，则刷新其状态而非覆盖。
+    // 无事项的指令（设置/取消提醒、拒绝等）：仅提示；若日程可见，则按当前视图原位刷新。
     toast(result.message);
-    if (document.querySelector('#memo-result .schedule-box')) {
-      showSchedule(await api('query_schedule', { record_history: false }));
-    }
+    await refreshScheduleView();
   } catch (error) { toast(error.message); }
 }
 
@@ -2506,8 +2515,8 @@ async function runSuggestedAction(actionId) {
     if (actionId === 'prepare_message') { toast('点击「🎤 语音输入」说出要发送的内容。'); return; }
     if (actionId === 'start_focus') { await requestMode('focus'); return; }
     if (actionId === 'resume_music') { await activateGeneralMusic(); return; }
-    if (actionId === 'query_schedule') { showSchedule(await api('query_schedule')); return; }
-    if (actionId === 'query_today') { showSchedule(await api('query_schedule', { scope: 'today' })); return; }
+    if (actionId === 'query_schedule') { currentScheduleQuery = {}; showSchedule(await api('query_schedule')); return; }
+    if (actionId === 'query_today') { currentScheduleQuery = { scope: 'today' }; showSchedule(await api('query_schedule', { scope: 'today' })); return; }
     toast('该建议暂不支持直接执行。');
   } catch (error) { toast(error.message); }
 }
@@ -2569,11 +2578,11 @@ function bindEvents() {
       } else if (result.kind === 'remove_authorized_sources') {
         renderAuthorizedSources(result.authorized_sources || [], result.message);
         $('#memo-result').innerHTML = '';
-      } else if (result.kind === 'restore_event_completion') {
-        showSchedule(await api('query_schedule', { record_history: false }));
+      } else if (result.kind === 'restore_event_completion' || result.kind === 'restore_reminder') {
+        await refreshScheduleView();
       } else if (result.kind === 'restore_reminder_offer') {
         // 撤销“不用提醒”：重新给出该事项的提醒建议（日程页可见时刷新）。
-        if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
+        await refreshScheduleView();
       }
       await refreshHistory();
     } catch (error) { toast(error.message); }
@@ -2631,6 +2640,7 @@ function bindEvents() {
   $('#sync-memo').onclick = () => openMemoPicker('merge');
   $('#memo-file').onchange = authorizeSelectedMemos;
   $('#query-schedule').onclick = async () => {
+    currentScheduleQuery = {};
     try { showSchedule(await api('query_schedule')); }
     catch (error) { toast(error.message); }
   };
