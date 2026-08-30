@@ -9,54 +9,107 @@
   <body>
     <header>
       <div>
-        <p class="eyebrow">Windows 本地演示原型</p>
         <h1>多模态个性化终端助手</h1>
       </div>
-      <label class="profile-select">演示用户 <select id="profile"></select></label>
+      <div class="header-tools">
+        <div class="camera-switcher" aria-label="全局摄像头控制">
+          <p id="camera-status" class="camera-status" role="status">摄像头未开启</p>
+          <button class="camera-button" id="start-camera">开启摄像头与手势</button>
+          <button class="camera-button" id="calibrate-gaze" disabled>校准视线</button>
+          <button class="camera-button" id="clear-gaze-calibration" disabled>清除校准</button>
+          <button class="camera-button" id="stop-camera" disabled>关闭摄像头与手势</button>
+        </div>
+        <label class="profile-select">用户 <select id="profile"></select></label>
+      </div>
     </header>
+
+    <aside class="camera-floating" id="camera-panel" aria-label="本机摄像头预览" hidden>
+      <div class="camera-floating-title"><strong>本机摄像头</strong><span id="camera-context">上下文：消息发送</span></div>
+      <div class="camera-stage">
+        <video id="camera-preview" autoplay muted playsinline aria-label="本机摄像头预览"></video>
+        <canvas id="face-overlay" aria-label="人脸关键点调试叠加层"></canvas>
+      </div>
+      <p class="gaze-feedback" id="gaze-feedback">开启摄像头后可进行视线校准。</p>
+      <p class="hand-gesture-status" id="hand-gesture-status">手势识别未开启。</p>
+      <p class="camera-privacy">预览不上传、不录像；关闭或离开页面时将停止。</p>
+    </aside>
+
+    <section class="gaze-calibration" id="gaze-calibration" aria-live="polite" hidden>
+      <div class="gaze-calibration-guide">
+        <strong>视线校准</strong>
+        <p id="calibration-instruction">请注视蓝色圆点，系统会自动采样。</p>
+        <button class="secondary" id="cancel-calibration">取消校准</button>
+      </div>
+      <span class="gaze-calibration-point" id="gaze-calibration-point" aria-hidden="true"></span>
+    </section>
 
     <main>
       <aside class="sidebar">
-        <button class="nav-button active" data-page="message">消息发送</button>
-        <button class="nav-button" data-page="music">音乐</button>
-        <button class="nav-button" data-page="memo">日程安排</button>
-        <p class="note">当前为按钮模拟输入。后续将把按钮事件替换为语音识别、视线落点和点头确认模块。</p>
+        <nav class="nav-list">
+          <button class="nav-button active" data-page="message">消息发送</button>
+          <button class="nav-button" data-page="music">音乐</button>
+          <button class="nav-button" data-page="memo">日程安排</button>
+        </nav>
+        <section class="voice-box" aria-label="语音输入">
+          <div class="voice-box-title">语音输入</div>
+          <textarea id="voice-result" placeholder="识别结果将显示在这里，可修改后确认发送。"></textarea>
+          <div class="voice-result-actions">
+            <button class="voice-input" data-target="current">🎤 开始录音</button>
+            <button class="primary" id="voice-confirm">确认发送</button>
+            <button class="secondary" id="voice-clear">清空</button>
+          </div>
+          <p class="asr-status" id="asr-status">点击「🎤 开始录音」说话，说完点「■ 停止录音」。语音在本地处理，不会上传。</p>
+        </section>
+        <section class="page-suggestions" aria-live="polite">
+          <strong>可能想做的事</strong>
+          <p id="page-suggestion-text">正在根据本地使用习惯准备建议。</p>
+          <div id="page-suggestion-actions"></div>
+        </section>
+        <details class="local-history" id="local-history">
+          <summary>本地交互历史与撤销</summary>
+          <p>这里只展示你实际执行过的操作；不保存画面、语音或消息正文。</p>
+          <button class="secondary" id="undo-nontext">撤销上一步操作</button>
+          <button class="secondary" id="refresh-history">刷新历史</button>
+          <button class="secondary" id="clear-history">清空本地历史</button>
+          <div class="history-list" id="history-list">展开后可查看。</div>
+          <p id="latency-summary" class="note">尚未记录本轮本地接口延迟。</p>
+          <p class="note" id="gesture-profile-info">展开历史后可查看头部动作自适应画像。</p>
+        </details>
       </aside>
 
       <section class="page active" id="message-page">
-        <p class="section-label">场景 A · 语音 + 视线 + 联系人页面</p>
-        <h2>给他发消息</h2>
-        <p>先点击模拟“注视”的联系人，再输入消息内容，模拟系统根据视线和语音中的“他”完成对象消歧。</p>
+        <h2>消息发送</h2>
+        <p>注视联系人卡片或用鼠标点击选择，然后说“给他发消息，内容”，确认后发送。</p>
         <div class="card-grid" id="contacts"></div>
-        <label>消息内容<textarea id="message-content" placeholder="例如：晚点开会"></textarea></label>
-        <button class="primary" id="prepare-message">生成发送确认</button>
         <div class="result" id="message-result"></div>
       </section>
 
       <section class="page" id="music-page">
-        <p class="section-label">场景 B · 明确场景模式 + 本地音乐偏好</p>
         <h2>音乐</h2>
-        <p>选择专注、开车或娱乐模式后，再通过注视音乐卡片和语音“播放这个”选择音乐。每次播放、喜欢或跳过都会只在当前模式下记录偏好。</p>
+        <p>选择专注、开车或娱乐模式，系统会推荐适合当前状态的歌曲，并根据你的反馈不断调整。</p>
         <div class="mode-grid" id="modes"></div>
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
-        <div class="card-grid muted" id="genres"></div>
         <div class="result" id="music-result"></div>
       </section>
 
       <section class="page" id="memo-page">
-        <p class="section-label">场景 C · 用户授权的本地备忘录</p>
         <h2>日程安排</h2>
-        <p>点击下方按钮后可一次选择多个 `.txt`、`.md` 或 `.json` 备忘录。新选择的文件集会替换旧授权列表，避免遗留文件混入结果。</p>
+        <p>授权本地备忘录文件后，可查询今天 / 明天 / 后天的安排，并为事项设置提醒。</p>
         <input id="memo-file" type="file" accept=".txt,.md,.json" multiple hidden />
-        <button class="secondary" id="choose-memo">选择并授权多个备忘录文件</button>
+        <div class="authorization-actions">
+          <button class="secondary" id="choose-memo">选择并授权备忘录文件</button>
+          <button class="secondary" id="sync-memo">选择更新后的文件并同步</button>
+        </div>
         <p class="authorization-status" id="authorization-status">尚未选择授权备忘录文件。</p>
+        <div class="authorized-file-list" id="authorized-files"></div>
         <button class="primary" id="query-schedule">查看所有已授权日程</button>
         <div class="result" id="memo-result"></div>
       </section>
     </main>
 
     <div class="toast" id="toast" aria-live="polite"></div>
+    <script src="/vendor/transformers/asr-bundle.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

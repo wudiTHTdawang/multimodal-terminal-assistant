@@ -11,3 +11,6 @@ data/authorized_memos/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Microsoft Office owner/temp files (e.g. ~$xxx.docx while the doc is open)
+~$*

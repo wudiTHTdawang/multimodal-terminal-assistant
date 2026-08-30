@@ -1,6 +1,6 @@
 [
   {
-    "id": "A01", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A01", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 700, "type": "gaze", "value": "contact_zhangsan", "confidence": 0.94 },
@@ -9,7 +9,7 @@
     "expected": { "intent": "send_message", "contact": "contact_zhangsan", "content": "晚点开会", "requires_confirmation": true }
   },
   {
-    "id": "A02", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A02", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 600, "type": "gaze", "value": "contact_lisi", "confidence": 0.88 },
@@ -18,7 +18,7 @@
     "expected": { "intent": "send_message", "contact": "contact_mama", "content": "我晚点回家", "requires_confirmation": true, "rule": "spoken_name_overrides_gaze" }
   },
   {
-    "id": "A03", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A03", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 900, "type": "speech", "value": "给他发消息，到了告诉我", "confidence": 0.95 }
@@ -26,7 +26,7 @@
     "expected": { "intent": "clarify_contact", "reason": "no_visual_or_spoken_contact" }
   },
   {
-    "id": "A04", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A04", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 400, "type": "gaze", "value": "contact_zhangsan", "confidence": 0.43 },
@@ -35,7 +35,7 @@
     "expected": { "intent": "clarify_contact", "reason": "low_gaze_confidence" }
   },
   {
-    "id": "A05", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A05", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 500, "type": "gaze", "value": "contact_zhangsan", "confidence": 0.93 },
@@ -46,7 +46,7 @@
     "expected": { "intent": "confirm_send", "action": "simulate_send", "contact": "contact_zhangsan" }
   },
   {
-    "id": "A06", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A06", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "confirm_send" },
       { "timestamp_ms": 500, "type": "speech", "value": "取消发送", "confidence": 0.98 },
@@ -55,7 +55,7 @@
     "expected": { "intent": "cancel_send", "action": "cancel", "rule": "negative_speech_overrides_nod" }
   },
   {
-    "id": "A07", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A07", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "confirm_send" },
       { "timestamp_ms": 700, "type": "speech", "value": "发送", "confidence": 0.95 }
@@ -63,7 +63,7 @@
     "expected": { "intent": "confirm_send", "action": "simulate_send" }
   },
   {
-    "id": "A08", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A08", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 600, "type": "gaze", "value": "contact_mama", "confidence": 0.93 },
@@ -72,7 +72,7 @@
     "expected": { "intent": "clarify_contact", "reason": "gaze_outside_alignment_window" }
   },
   {
-    "id": "A09", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A09", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 700, "type": "gaze", "value": "contact_lisi", "confidence": 0.93 },
@@ -81,7 +81,7 @@
     "expected": { "intent": "send_message", "contact": "contact_lisi", "content": "明天见", "requires_confirmation": true }
   },
   {
-    "id": "A10", "scene": "message", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "A10", "scene": "message", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "contacts" },
       { "timestamp_ms": 700, "type": "gaze", "value": "contact_zhangsan", "confidence": 0.93 },
@@ -90,12 +90,12 @@
     "expected": { "intent": "cancel_send", "action": "cancel", "rule": "explicit_negative" }
   },
   {
-    "id": "B01", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B01", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "我准备学习", "confidence": 0.97 }],
     "expected": { "intent": "start_focus", "context": "focus_mode", "action": "show_focus_music_options" }
   },
   {
-    "id": "B02", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B02", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "focus_music" },
       { "timestamp_ms": 600, "type": "gaze", "value": "genre_lofi", "confidence": 0.92 },
@@ -104,17 +104,17 @@
     "expected": { "intent": "play_music", "genre": "lofi", "context": "focus_mode" }
   },
   {
-    "id": "B03", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_chenmo",
+    "id": "B03", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_chenmo",
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "开始专注", "confidence": 0.96 }],
     "expected": { "intent": "start_focus", "recommended_genre": "pure_music", "rule": "profile_preference" }
   },
   {
-    "id": "B04", "scene": "music", "reference_date": "2026-08-23", "profile_id": "new_user",
+    "id": "B04", "scene": "music", "reference_date": "2026-08-30", "profile_id": "new_user",
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "我准备学习", "confidence": 0.96 }],
     "expected": { "intent": "start_focus", "recommended_genre": "light_music", "message_key": "no_focus_preference_yet" }
   },
   {
-    "id": "B05", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B05", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "now_playing_focus" },
       { "timestamp_ms": 600, "type": "speech", "value": "下一首", "confidence": 0.96 }
@@ -122,7 +122,7 @@
     "expected": { "intent": "next_track", "action": "skip_current_track", "preference_delta": { "current_genre": -1 } }
   },
   {
-    "id": "B06", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B06", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "now_playing_focus" },
       { "timestamp_ms": 600, "type": "speech", "value": "我喜欢这首", "confidence": 0.96 }
@@ -130,7 +130,7 @@
     "expected": { "intent": "like_track", "preference_delta": { "current_genre": 2 }, "context": "focus_mode" }
   },
   {
-    "id": "B07", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B07", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "now_playing_focus" },
       { "timestamp_ms": 500, "type": "speech", "value": "这首不喜欢", "confidence": 0.97 }
@@ -138,12 +138,12 @@
     "expected": { "intent": "dislike_track", "action": "skip_current_track", "preference_delta": { "current_genre": -1 } }
   },
   {
-    "id": "B08", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B08", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "播放学习音乐", "confidence": 0.95 }],
     "expected": { "intent": "clarify_or_offer_start_focus", "reason": "focus_context_not_explicit" }
   },
   {
-    "id": "B09", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B09", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "focus_music" },
       { "timestamp_ms": 600, "type": "gaze", "value": "genre_pop", "confidence": 0.39 },
@@ -152,7 +152,7 @@
     "expected": { "intent": "clarify_music_selection", "reason": "low_gaze_confidence" }
   },
   {
-    "id": "B10", "scene": "music", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu",
+    "id": "B10", "scene": "music", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu",
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "focus_music" },
       { "timestamp_ms": 600, "type": "gaze", "value": "genre_pure_music", "confidence": 0.93 },
@@ -161,27 +161,27 @@
     "expected": { "intent": "play_music", "genre": "lofi", "rule": "spoken_genre_overrides_gaze" }
   },
   {
-    "id": "C01", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C01", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "我明天有什么安排", "confidence": 0.97 }],
-    "expected": { "intent": "query_tomorrow_plan", "date": "2026-08-24", "memo_ids": ["memo_001", "memo_002", "memo_003"], "should_offer_reminder": true }
+    "expected": { "intent": "query_tomorrow_plan", "date": "2026-08-31", "memo_ids": ["memo_001", "memo_002", "memo_003"], "should_offer_reminder": true }
   },
   {
-    "id": "C02", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": [],
+    "id": "C02", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": [],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "我明天有什么安排", "confidence": 0.97 }],
     "expected": { "intent": "request_memo_authorization", "reason": "no_authorized_memo_source" }
   },
   {
-    "id": "C03", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C03", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "明天最重要的事情是什么", "confidence": 0.96 }],
     "expected": { "intent": "query_priority", "memo_id": "memo_001", "reason": "earliest_high_priority_item" }
   },
   {
-    "id": "C04", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C04", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "明天有哪些高优先级事项", "confidence": 0.96 }],
     "expected": { "intent": "query_priority", "memo_ids": ["memo_001", "memo_002"] }
   },
   {
-    "id": "C05", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C05", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [
       { "timestamp_ms": 0, "type": "speech", "value": "我明天有什么安排", "confidence": 0.97 },
       { "timestamp_ms": 1600, "type": "page", "value": "offer_reminder_memo_001" },
@@ -190,7 +190,7 @@
     "expected": { "intent": "decline_reminder", "action": "do_not_create_current_reminder", "profile_change": false }
   },
   {
-    "id": "C06", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C06", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [
       { "timestamp_ms": 0, "type": "page", "value": "offer_reminder_memo_001" },
       { "timestamp_ms": 600, "type": "nod", "value": "yes", "confidence": 0.92 }
@@ -198,22 +198,22 @@
     "expected": { "intent": "confirm_reminder", "action": "create_local_reminder", "memo_id": "memo_001" }
   },
   {
-    "id": "C07", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C07", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "以后同类事项都不要提醒", "confidence": 0.96 }],
     "expected": { "intent": "update_reminder_preference", "preference": "disable_similar_reminders", "requires_confirmation": true }
   },
   {
-    "id": "C08", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C08", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "帮我修改明天的组会时间", "confidence": 0.96 }],
     "expected": { "intent": "request_edit_memo", "action": "ask_for_edit_details_and_confirmation", "rule": "no_write_without_confirmation" }
   },
   {
-    "id": "C09", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C09", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "后天有什么安排", "confidence": 0.96 }],
-    "expected": { "intent": "query_date_plan", "date": "2026-08-25", "memo_ids": ["memo_004"] }
+    "expected": { "intent": "query_date_plan", "date": "2026-09-01", "memo_ids": ["memo_004"] }
   },
   {
-    "id": "C10", "scene": "memo", "reference_date": "2026-08-23", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
+    "id": "C10", "scene": "memo", "reference_date": "2026-08-30", "profile_id": "user_xiaoyu", "authorized_sources": ["memo_demo.json"],
     "events": [{ "timestamp_ms": 0, "type": "speech", "value": "明天的安排会不会太赶", "confidence": 0.95 }],
     "expected": { "intent": "analyze_schedule_pressure", "memo_ids": ["memo_001", "memo_002"], "should_suggest": "complete_report_draft_tonight" }
   }
