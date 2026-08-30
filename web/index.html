@@ -49,7 +49,8 @@
         <button class="nav-button active" data-page="message">消息发送</button>
         <button class="nav-button" data-page="music">音乐</button>
         <button class="nav-button" data-page="memo">日程安排</button>
-        <p class="note">顶部摄像头开关一次授权后可供三个模块共用。后续将把页面上下文、视线落点与模拟语音合并理解。</p>
+        <p class="note">顶部摄像头开关一次授权后可供三个模块共用。系统将把语音、视线落点与页面上下文合并理解。</p>
+        <p class="asr-status" id="asr-status">语音识别：未加载。点击任一页面「🎤 语音输入」将首次加载本地模型（约 45MB）；音频在浏览器内识别，不出本机。</p>
         <section class="page-suggestions" aria-live="polite">
           <strong>可能想做的事</strong>
           <p id="page-suggestion-text">正在根据本地使用习惯准备建议。</p>
@@ -62,6 +63,7 @@
           <button class="secondary" id="refresh-history">刷新历史</button>
           <button class="secondary" id="clear-history">清空本地历史</button>
           <div class="history-list" id="history-list">展开后可查看。</div>
+          <p id="latency-summary" class="note">尚未记录本轮本地接口延迟。</p>
           <p class="note" id="gesture-profile-info">展开历史后可查看头部动作自适应画像。</p>
         </details>
       </aside>
@@ -71,21 +73,11 @@
         <h2>给他发消息</h2>
         <p>页面右上角的全局摄像头可在一次授权后被消息、音乐和日程三个模块共用。第一阶段仅展示预览；下一阶段将把画面中的注视方向与当前页面内容对应。当前仍可点击联系人卡片作为备用演示输入。</p>
         <div class="card-grid" id="contacts"></div>
-        <label>模拟语音指令<textarea id="message-content" placeholder="例如：给他发消息，晚点开会"></textarea></label>
+        <p class="voice-only-note">语音输入：点击下方「🎤 语音输入」，说一句话，浏览器本地识别后交由系统理解执行（文本模拟输入已移除）。</p>
         <div class="speech-presets">
-          <button class="secondary speech-preset" data-text="给他发消息，晚点开会">预设：给他发消息，晚点开会</button>
-          <button class="secondary speech-preset" data-text="确认发送">预设：确认发送</button>
-          <button class="secondary speech-preset" data-text="取消发送">预设：取消发送</button>
+          <button class="voice-input" data-target="message">🎤 语音输入</button>
         </div>
-        <button class="primary" id="prepare-message">提交模拟语音指令</button>
         <div class="result" id="message-result"></div>
-        <details class="multimodal-inspector" id="multimodal-inspector">
-          <summary>查看本轮本地多模态处理记录</summary>
-          <p>仅显示最近 10 秒的结构化事件，用于演示与联调；不会展示或保存摄像头画面、人脸关键点或原始音频。</p>
-          <button class="secondary" id="refresh-multimodal-events">刷新记录</button>
-          <p id="latency-summary" class="note">尚未记录本轮本地接口延迟。</p>
-          <div class="multimodal-event-list" id="multimodal-event-list">展开后可查看本轮事件。</div>
-        </details>
       </section>
 
       <section class="page" id="music-page">
@@ -96,12 +88,10 @@
         <div class="mode-status" id="mode-status">当前未启用音乐模式。</div>
         <div class="mode-decision" id="mode-decision"></div>
         <div class="result" id="music-result"></div>
-        <label>模拟语音指令<textarea id="music-command" placeholder="例如：取消当前歌曲选择"></textarea></label>
+        <p class="voice-only-note">语音输入：点击「🎤 语音输入」说话即可（如"我喜欢这首""下一首""开始专注"）。</p>
         <div class="speech-presets">
-          <button class="secondary music-speech-preset" data-text="取消当前歌曲选择">预设：取消歌曲选择</button>
-          <button class="secondary music-speech-preset" data-text="下一首">预设：下一首</button>
+          <button class="voice-input" data-target="music">🎤 语音输入</button>
         </div>
-        <button class="primary" id="prepare-music-command">提交模拟语音指令</button>
       </section>
 
       <section class="page" id="memo-page">
@@ -116,18 +106,17 @@
         </div>
         <p class="authorization-status" id="authorization-status">尚未选择授权备忘录文件。</p>
         <div class="authorized-file-list" id="authorized-files"></div>
-        <label>模拟语音查询<textarea id="schedule-content" placeholder="例如：我明天有什么安排？"></textarea></label>
+        <p class="voice-only-note">语音输入：点击「🎤 语音输入」说话即可（如"我明天有什么安排""后天有什么安排"）。</p>
         <div class="speech-presets">
-          <button class="secondary schedule-speech-preset" data-text="我今天有什么安排？">预设：今天安排</button>
-          <button class="secondary schedule-speech-preset" data-text="我明天有什么安排？">预设：明天安排</button>
+          <button class="voice-input" data-target="memo">🎤 语音输入</button>
         </div>
-        <button class="primary" id="prepare-schedule">提交模拟语音查询</button>
         <button class="primary" id="query-schedule">查看所有已授权日程</button>
         <div class="result" id="memo-result"></div>
       </section>
     </main>
 
     <div class="toast" id="toast" aria-live="polite"></div>
+    <script src="/vendor/transformers/asr-bundle.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

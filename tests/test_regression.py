@@ -10,7 +10,7 @@ import json
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import app
@@ -41,15 +41,43 @@ class RegressionTests(unittest.TestCase):
 
     # ---------- 演示基准日期 ----------
 
+    @staticmethod
+    def tomorrow_str():
+        return (app.demo_reference_date() + timedelta(days=1)).isoformat()
+
+    def test_past_event_is_grayed_and_not_offered(self):
+        state = self.state_with_memo()
+        all_items = app.schedule_items(state)
+        past_date = (app.demo_reference_date() - timedelta(days=1)).isoformat()
+        past_item = next(item for item in all_items if item.get("date") == past_date)
+        self.assertTrue(past_item["is_past"])  # 过期事项标记为灰显
+        offer = app.build_reminder_offer(state, all_items)
+        self.assertEqual(offer["title"], "组会")  # 过期的高优先级周报不被建议提醒
+
+    def test_declined_reminder_offer_persists(self):
+        state = self.state_with_memo()
+        first_offer = app.schedule_query_result(state, self.tomorrow_str())["reminder_offer"]
+        self.assertEqual(first_offer["title"], "组会")
+        app.AssistantHandler._dispatch_action(self.handler, {
+            "action": "decline_reminder", "event_key": first_offer["event_key"],
+        }, state)
+        self.assertIn(first_offer["event_key"], state["declined_reminder_offers"])
+        # 拒绝后同一事项不再建议（可转向下一高优先级事项）
+        next_offer = app.schedule_query_result(state, self.tomorrow_str())["reminder_offer"]
+        self.assertNotEqual(next_offer["event_key"], first_offer["event_key"])
+        self.assertEqual(next_offer["title"], "提交实验报告")
+
     def test_demo_now_anchors_past_and_schedule(self):
+        reference = app.demo_reference_date()
         original_now = app.demo_now
-        app.demo_now = lambda: datetime(2026, 8, 23, 12, 0)
+        app.demo_now = lambda: datetime.combine(reference, datetime.min.time()).replace(hour=12)
         try:
-            self.assertFalse(app.is_past_event({"date": "2026-08-24", "time": "10:00"}))
-            self.assertTrue(app.is_past_event({"date": "2026-08-23", "time": "10:00"}))   # 早于演示正午
-            self.assertFalse(app.is_past_event({"date": "2026-08-23", "time": "18:00"}))  # 晚于演示正午
-            result = app.schedule_query_result(self.state_with_memo(), "2026-08-24", "明天（2026-08-24）日程")
-            self.assertEqual(result["date"], "2026-08-24")
+            tomorrow = (reference + timedelta(days=1)).isoformat()
+            self.assertFalse(app.is_past_event({"date": tomorrow, "time": "10:00"}))
+            self.assertTrue(app.is_past_event({"date": reference.isoformat(), "time": "10:00"}))   # 早于演示正午
+            self.assertFalse(app.is_past_event({"date": reference.isoformat(), "time": "18:00"}))  # 晚于演示正午
+            result = app.schedule_query_result(self.state_with_memo(), tomorrow, f"明天（{tomorrow}）日程")
+            self.assertEqual(result["date"], tomorrow)
             self.assertEqual(result["total"], 3)
         finally:
             app.demo_now = original_now
@@ -59,20 +87,20 @@ class RegressionTests(unittest.TestCase):
         today = app.AssistantHandler._dispatch_action(self.handler, {
             "action": "query_schedule", "scope": "today", "record_history": False,
         }, state)
-        self.assertEqual(today["title"], "今天（2026-08-23）日程")
+        self.assertEqual(today["title"], f"今天（{app.demo_today_str()}）日程")
         tomorrow = app.AssistantHandler._dispatch_action(self.handler, {
             "action": "query_schedule", "scope": "tomorrow", "record_history": False,
         }, state)
-        self.assertEqual(tomorrow["date"], "2026-08-24")
+        self.assertEqual(tomorrow["date"], self.tomorrow_str())
         self.assertEqual(tomorrow["total"], 3)
 
     # ---------- 提醒链路 ----------
 
     def test_reminder_offer_dedupe_and_undo(self):
         state = self.state_with_memo()
-        offer = app.schedule_query_result(state, "2026-08-24")["reminder_offer"]
+        offer = app.schedule_query_result(state, self.tomorrow_str())["reminder_offer"]
         self.assertIsNotNone(offer)
-        self.assertEqual(offer["remind_time"], "2026-08-24 09:10")  # 10:00 - 画像提前量 50 分钟
+        self.assertEqual(offer["remind_time"], f"{self.tomorrow_str()} 09:10")  # 明天 10:00 - 画像提前量 50 分钟
         first = app.AssistantHandler._dispatch_action(self.handler, {
             "action": "create_reminder", "event_key": offer["event_key"],
         }, state)

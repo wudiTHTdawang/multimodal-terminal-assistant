@@ -156,6 +156,128 @@ function setCameraContext(label) {
   $('#camera-context').textContent = `上下文：${label}`;
 }
 
+// ---- 离线语音识别（浏览器端 Whisper 量化模型；音频不出本机）----
+let asrPipeline = null;
+let asrLoading = null;
+let asrRecorder = null; // { stream, context, source, processor, chunks, targetId }
+
+function setAsrStatus(message) {
+  const node = $('#asr-status');
+  if (node) node.textContent = message;
+}
+
+async function getAsrPipeline() {
+  if (asrPipeline) return asrPipeline;
+  if (asrLoading) return asrLoading;
+  asrLoading = (async () => {
+    setAsrStatus('正在加载本地语音识别模型（约 45MB，首次约需数十秒）…');
+    if (!window.__asr?.pipeline) {
+      throw new Error('语音识别运行时未加载（window.__asr 缺失）。请用 Chrome/Edge 并硬刷新页面（Ctrl+F5）；若仍失败请查看浏览器控制台。');
+    }
+    const { pipeline, env } = window.__asr;
+    env.allowRemoteModels = false;                                    // 完全离线，不访问任何远端
+    env.localModelPath = '/models/';                                  // 模型随项目本地发布
+    env.backends.onnx = env.backends.onnx || {};
+    env.backends.onnx.wasm = env.backends.onnx.wasm || {};
+    env.backends.onnx.wasm.wasmPaths = '/vendor/transformers/';       // WASM 运行时本地发布
+    asrPipeline = await pipeline('automatic-speech-recognition', 'whisper-tiny', {
+      quantized: true,
+    });
+    setAsrStatus('本地语音识别已就绪（Whisper 量化模型，音频在浏览器内处理，不上传）。');
+    return asrPipeline;
+  })();
+  try {
+    return await asrLoading;
+  } catch (error) {
+    asrLoading = null;
+    setAsrStatus(`语音模型加载失败：${error.message || error}`);
+    throw error;
+  }
+}
+
+function setVoiceButtonsRecording(recording) {
+  document.querySelectorAll('.voice-input').forEach((button) => {
+    button.classList.toggle('recording', recording);
+    button.textContent = recording ? '■ 停止录音' : '🎤 语音输入';
+  });
+  const status = $('#asr-status');
+  if (status) status.classList.toggle('recording', recording);
+}
+
+async function startAsrRecording(targetId) {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const context = new AudioContext({ sampleRate: 16000 }); // 采样率统一为 16k
+  await context.resume();
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  processor.onaudioprocess = (event) => {
+    chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  source.connect(processor);
+  processor.connect(context.destination);
+  asrRecorder = { stream, context, source, processor, chunks, targetId };
+  setVoiceButtonsRecording(true);
+  setAsrStatus('正在聆听…点击「■ 停止录音」结束并识别。');
+}
+
+async function stopAsrRecording() {
+  if (!asrRecorder) return;
+  const { stream, context, source, processor, chunks, targetId } = asrRecorder;
+  asrRecorder = null;
+  setVoiceButtonsRecording(false);
+  try { source.disconnect(); processor.disconnect(); } catch { /* 已断开 */ }
+  stream.getTracks().forEach((track) => track.stop());
+  await context.close();
+  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (length < 16000 * 0.3) {
+    setAsrStatus('录音太短，未识别。请点击「🎤 语音输入」后至少说 1 秒。');
+    return;
+  }
+  const audio = new Float32Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    audio.set(chunk, offset);
+    offset += chunk.length;
+  }
+  setAsrStatus('正在本地识别…');
+  try {
+    const pipe = await getAsrPipeline();
+    const output = await pipe(audio, { language: 'zh', task: 'transcribe' });
+    const text = (output.text || '').trim();
+    if (!text) {
+      setAsrStatus('未识别到语音，请再试一次。');
+      return;
+    }
+    setAsrStatus(`已识别：${text}。将提交给本地大模型理解后执行。`);
+    toast(`已识别：${text}`);
+    // 语音文本自动提交：source=mic 时后端会先让本地大模型整理成规范指令，规则再做最终裁决。
+    const submitByTarget = {
+      'message': (recognized) => submitSimulatedSpeech('mic', recognized),
+      'music': (recognized) => submitSimulatedMusicCommand('mic', recognized),
+      'memo': (recognized) => submitScheduleSimulatedSpeech('mic', recognized),
+    };
+    const submit = submitByTarget[targetId];
+    if (submit) window.setTimeout(() => submit(text), 350);
+  } catch (error) {
+    setAsrStatus(`识别失败：${error.message || error}（可刷新页面重试，或查看浏览器控制台）`);
+    toast(`识别失败：${error.message || error}`);
+  }
+}
+
+async function toggleVoiceInput(targetId) {
+  try {
+    if (asrRecorder) {
+      await stopAsrRecording();
+      return;
+    }
+    await startAsrRecording(targetId);
+  } catch (error) {
+    setAsrStatus(`麦克风不可用：${error.message || error}（请允许麦克风权限后重试）`);
+    toast(`无法开启麦克风：${error.message || error}`);
+  }
+}
+
 function loadGazeCalibration() {
   try {
     const saved = JSON.parse(localStorage.getItem(GAZE_CALIBRATION_STORAGE_KEY));
@@ -350,6 +472,7 @@ function clearGazeTarget() {
   gazeCandidateReliabilityUpdatedAt = 0;
   musicGazeGestureWindowUntil = 0;
   musicGestureReadyAt = 0;
+  clearScheduleReminderPrompt();
 }
 
 function clearMusicTrackSelection(message) {
@@ -498,45 +621,10 @@ async function recordBrowserEvent(event) {
   try {
     validateBrowserEvent(event);
     const result = await api('record_multimodal_event', { event });
-    // 面板默认折叠，只有用户主动展开时才额外刷新，避免为调试展示增加日常请求。
-    if ($('#multimodal-inspector')?.open) void refreshMultimodalInspector();
     return result;
   } catch (error) {
     // 结构化事件失败不阻断本地交互，但会让开发者在控制台看到明确原因。
     console.warn('多模态事件未记录：', error.message);
-  }
-}
-
-function describeMultimodalEvent(event) {
-  const payload = event.payload || {};
-  if (event.modality === 'gaze') return `注视 ${payload.target_type === 'contact' ? '联系人' : '页面对象'}：${payload.target_id || '未命名对象'}（停留 ${payload.dwell_ms || 0}ms）`;
-  if (event.modality === 'screen_context') return `页面上下文：${payload.page || 'unknown'}，可见 ${payload.visible_targets?.length || 0} 个对象`;
-  if (event.modality === 'speech_text') return `模拟语音：${payload.text || '空文本'}`;
-  if (event.modality === 'head_gesture') return `头部动作：${payload.decision === 'confirm' ? '点头确认' : '摇头拒绝'}`;
-  if (event.modality === 'hand_gesture') return `手势输入：${payload.gesture || payload.decision}`;
-  return '未知结构化事件';
-}
-
-function renderMultimodalInspector(events) {
-  const target = $('#multimodal-event-list');
-  if (!target) return;
-  if (!events?.length) {
-    target.textContent = '最近 10 秒暂未记录事件。';
-    return;
-  }
-  target.innerHTML = [...events].reverse().map((event) => {
-    const time = new Date(event.timestamp_ms).toLocaleTimeString('zh-CN', { hour12: false });
-    return `<article class="multimodal-event"><strong>${escapeHtml(event.modality)}</strong><span>${escapeHtml(describeMultimodalEvent(event))}</span><time>${escapeHtml(time)}</time></article>`;
-  }).join('');
-}
-
-async function refreshMultimodalInspector() {
-  try {
-    const result = await api('get_recent_multimodal_events');
-    renderMultimodalInspector(result.events);
-  } catch (error) {
-    const target = $('#multimodal-event-list');
-    if (target) target.textContent = `读取本地事件失败：${error.message}`;
   }
 }
 
@@ -600,7 +688,7 @@ function renderMessageUnderstanding(result) {
   const explanation = result.explanation?.length
     ? `<ul>${result.explanation.map((item) => `<li>${item}</li>`).join('')}</ul>` : '';
   const actions = result.pending
-    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">确认后将仅在本地模拟消息应用中展示发送成功；也可在模拟语音框中说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
+    ? '<p><button class="primary" id="confirm-send">确认发送</button><button class="secondary" id="cancel-send">取消</button></p><small class="decision-hint">确认后将仅在本地模拟消息应用中展示发送成功；也可说“是 / 确认”或“不用 / 取消”，或点头 / 摇头。</small>' : '';
   $('#message-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong>${explanation}${actions}</div>`;
   if (result.pending) {
     pendingMessage = result.pending;
@@ -613,10 +701,10 @@ function fusionSummary(result) {
   return result?.fusion?.summary ? `多模态综合判断：${result.fusion.summary}` : '';
 }
 
-async function submitSimulatedSpeech() {
-  const text = $('#message-content').value.trim();
+async function submitSimulatedSpeech(source = 'mic', providedText) {
+  const text = (providedText || '').trim();
   if (!text) {
-    toast('请输入或选择一条模拟语音指令。');
+    toast('未识别到语音内容，请重试。');
     return;
   }
 
@@ -627,13 +715,11 @@ async function submitSimulatedSpeech() {
     if (decision === 'confirm') {
       const suggestion = pendingGazeSuggestion;
       clearGazeSuggestion();
-      $('#message-content').value = '';
       await lockGazeTarget(suggestion.node, suggestion.zone, suggestion.confidence);
       return;
     }
     if (decision === 'reject') {
       rejectGazeSuggestion();
-      $('#message-content').value = '';
       return;
     }
     toast('可以说“是”或“不用”，也可以点头或摇头。');
@@ -648,7 +734,7 @@ async function submitSimulatedSpeech() {
       modality: 'speech_text',
       timestamp_ms: timestamp,
       confidence: 1,
-      payload: { text, page: 'message', source: 'simulated' },
+      payload: { text, page: 'message', source },
     });
     const result = await api('understand_multimodal_command', {
       speech_timestamp_ms: timestamp,
@@ -668,10 +754,10 @@ async function submitSimulatedSpeech() {
   }
 }
 
-async function submitSimulatedMusicCommand() {
-  const text = $('#music-command').value.trim();
+async function submitSimulatedMusicCommand(source = 'mic', providedText) {
+  const text = (providedText || '').trim();
   if (!text) {
-    toast('请输入或选择一条音乐模拟语音指令。');
+    toast('未识别到语音内容，请重试。');
     return;
   }
   const timestamp = Date.now();
@@ -680,13 +766,12 @@ async function submitSimulatedMusicCommand() {
       modality: 'speech_text',
       timestamp_ms: timestamp,
       confidence: 1,
-      payload: { text, page: 'music', source: 'simulated' },
+      payload: { text, page: 'music', source },
     });
     const result = await api('understand_multimodal_command', {
       speech_timestamp_ms: timestamp,
       current_track_id: currentTrack?.id,
     });
-    $('#music-command').value = '';
     if (fusionSummary(result)) $('#gaze-feedback').textContent = fusionSummary(result);
     if (result.intent === 'cancel_music_selection') {
       clearMusicTrackSelection(result.message);
@@ -772,7 +857,7 @@ async function lockGazeTarget(node, zone, confidence) {
       document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
       node.classList.add('selected');
       $('#message-result').innerHTML = '';
-      $('#gaze-feedback').textContent = `已确认选择：${label}。现在可提交模拟语音指令。`;
+      $('#gaze-feedback').textContent = `已确认选择：${label}。现在可语音发消息。`;
       toast(`已通过摄像头注视选择：${label}`);
     } catch (error) {
       selectedContactId = undefined;
@@ -789,7 +874,50 @@ async function lockGazeTarget(node, zone, confidence) {
     // 只从“确认注视歌曲卡片”这一刻开始采集头部运动，避免把此前的自然晃动误判成偏好。
     headMotionHistory = [];
     $('#gaze-feedback').textContent = `已确认注视：${label}。请在 3 秒内点头表示喜欢，摇头表示不喜欢并换歌。`;
+  } else if (node.classList.contains('schedule-item')) {
+    // 注视锁定日程事项后，询问是否需要为该事件生成提醒（可点头/摇头或用按钮）。
+    const eventKey = node.querySelector('[data-event-key]')?.dataset.eventKey;
+    if (eventKey) showScheduleReminderPrompt(node, eventKey, label);
+    else $('#gaze-feedback').textContent = `已持续注视：${label}。`;
   }
+}
+
+// ---- 视线锁定日程事项 → 提醒生成询问 ----
+let pendingScheduleReminder = null;
+
+function clearScheduleReminderPrompt() {
+  document.querySelector('.schedule-reminder-prompt')?.remove();
+  pendingScheduleReminder = undefined;
+}
+
+function showScheduleReminderPrompt(node, eventKey, label) {
+  if (pendingScheduleReminder) return;
+  const prompt = document.createElement('section');
+  prompt.className = 'schedule-reminder-prompt';
+  prompt.innerHTML = `<strong>需要为「${escapeHtml(label)}」生成提醒吗？</strong><p>将按你的偏好提前提醒。</p><div><button class="primary" id="schedule-prompt-accept">提醒我</button><button class="secondary" id="schedule-prompt-decline">不用</button></div><small>也可点头 / 摇头。</small>`;
+  document.body.append(prompt);
+  positionGazePrompt(prompt, node);
+  pendingScheduleReminder = { node, eventKey };
+  prompt.querySelector('#schedule-prompt-accept').onclick = async () => {
+    const target = pendingScheduleReminder;
+    clearScheduleReminderPrompt();
+    if (!target) return;
+    try {
+      const result = await api('create_reminder', { event_key: target.eventKey });
+      toast(result.message);
+      if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
+    } catch (error) { toast(error.message); }
+  };
+  prompt.querySelector('#schedule-prompt-decline').onclick = async () => {
+    const target = pendingScheduleReminder;
+    clearScheduleReminderPrompt();
+    if (!target) return;
+    try {
+      const result = await api('decline_reminder', { event_key: target.eventKey });
+      toast(result.message);
+      if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
+    } catch (error) { toast(error.message); }
+  };
 }
 
 function parseContactSuggestionSpeech(text) {
@@ -980,13 +1108,64 @@ function updateGazeTarget(prediction) {
   }
 }
 
+function headGestureHasTarget() {
+  // 存在任何一个“是/否”交互时，点头/摇头才生效：联系人/歌曲候选、待确认消息、
+  // 音乐卡片反馈、日程提醒建议、模式切换确认。
+  return Boolean(
+    pendingGazeSuggestion
+    || pendingMusicGazeSuggestion
+    || pendingMessage
+    || canAnswerMusicFeedback()
+    || reminderOfferActive()
+    || modeDecisionActive()
+  );
+}
+
+function reminderOfferActive() {
+  // 日程页提醒建议（首个 offer）或视线锁定日程项后的提醒询问
+  return Boolean(
+    ($('#accept-reminder') && $('#accept-reminder').isConnected)
+    || ($('#schedule-prompt-accept') && $('#schedule-prompt-accept').isConnected)
+  );
+}
+
+function modeDecisionActive() {
+  return Boolean($('#decision-switch') && $('#decision-switch').isConnected);
+}
+
+async function acceptReminderOffer(motionStrength) {
+  await recordHeadDecision('confirm', 'reminder_offer', 'memo', motionStrength);
+  const promptButton = $('#schedule-prompt-accept');
+  if (promptButton && promptButton.isConnected) { promptButton.click(); return; }
+  $('#accept-reminder')?.click();
+}
+
+async function declineReminderOffer(motionStrength) {
+  await recordHeadDecision('reject', 'reminder_offer', 'memo', motionStrength);
+  const promptButton = $('#schedule-prompt-decline');
+  if (promptButton && promptButton.isConnected) { promptButton.click(); return; }
+  $('#decline-reminder')?.click();
+}
+
+async function confirmModeSwitch(motionStrength) {
+  await recordHeadDecision('confirm', 'mode_switch', 'music', motionStrength);
+  $('#decision-switch')?.click();
+}
+
+async function rejectModeSwitch(motionStrength) {
+  await recordHeadDecision('reject', 'mode_switch', 'music', motionStrength);
+  switchArmed = false;
+  $('#mode-decision').innerHTML = '';
+  toast('已取消切换模式。');
+}
+
 function observeHeadGesture(landmarks) {
   // 音乐反馈仅在歌曲卡片锁定后的短暂窗口内接受。窗口内暂停重新判断视线，
   // 使点头/摇头不会因为自身改变了眼部特征而丢失锁定。
   // 抬手、挥手会带动上半身与脸部关键点；手势识别期间不把这类变化误当成摇头。
   if (performance.now() < handGestureSuppressHeadUntil) return;
   const canAnswerMusic = canAnswerMusicFeedback();
-  if ((!pendingGazeSuggestion && !pendingMusicGazeSuggestion && (!pendingMessage || messageDecisionInProgress) && !canAnswerMusic) || Date.now() - lastHeadGestureAt < 1500) return;
+  if ((!headGestureHasTarget() || (pendingMessage && messageDecisionInProgress)) || Date.now() - lastHeadGestureAt < 1500) return;
   const leftEye = landmarks[33];
   const rightEye = landmarks[263];
   const nose = landmarks[1];
@@ -1048,6 +1227,10 @@ function observeHeadGesture(landmarks) {
       })();
     } else if (pendingMessage) {
       void finishMessageDecision('confirm_send', 'success', 'head', motionStrength);
+    } else if (reminderOfferActive()) {
+      void acceptReminderOffer(motionStrength);
+    } else if (modeDecisionActive()) {
+      void confirmModeSwitch(motionStrength);
     } else {
       void likeCurrentTrack('head', motionStrength);
     }
@@ -1061,6 +1244,10 @@ function observeHeadGesture(landmarks) {
       dismissMusicGazeSuggestion('好的，暂不选中这首歌。');
     } else if (pendingMessage) {
       void finishMessageDecision('cancel_message', 'cancel', 'head', motionStrength);
+    } else if (reminderOfferActive()) {
+      void declineReminderOffer(motionStrength);
+    } else if (modeDecisionActive()) {
+      void rejectModeSwitch(motionStrength);
     } else {
       void dislikeCurrentTrack('head', motionStrength);
     }
@@ -1214,7 +1401,7 @@ async function enableHandGestures() {
     handGestureSuppressHeadUntil = 0;
     stablePalmPose = undefined;
     stablePalmPoseAt = 0;
-    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，手掌开合暂停 / 继续，横向或斜向挥动张开的手掌切下一首（挥手无需先选中播放卡片）。');
+    setHandGestureStatus('手势已开启：点赞确认 / 喜欢，踩拒绝 / 不喜欢，食指上指或横向挥手切下一首，手掌开合暂停 / 继续（切歌无需先选中播放卡片）。');
   } catch (error) {
     handGesturesEnabled = false;
     setHandGestureStatus(`手势模型加载失败：${error.message || '未知错误'}`);
@@ -1312,6 +1499,12 @@ async function applyHandGesture(gesture, confidence) {
     await nextTrack('hand');
     return true;
   }
+  // 食指上指：静态手势，分类器识别稳定，作为切歌的可靠备用方案（无需大幅挥手）。
+  if (gesture === 'Pointing_Up' && canWaveSkip()) {
+    await recordHandGesture('skip_track', 'Pointing_Up', 'music_skip', 'music', confidence);
+    await nextTrack('hand');
+    return true;
+  }
   return false;
 }
 
@@ -1332,6 +1525,8 @@ function isLikelyOpenPalm(landmarks) {
 }
 
 function detectPalmWave(landmarks, now, waveEligible) {
+  // 只要有手部关键点就跟踪轨迹（不再强求先识别到“张开手掌”，分类器在挥手时
+  // 经常短暂丢帧，只靠开手条件会让挥手几乎无法触发）。
   if (!waveEligible || !landmarks?.[0] || !landmarks?.[5] || !landmarks?.[17]) {
     handMotionHistory = [];
     return false;
@@ -1395,8 +1590,8 @@ function observeHandGesture(result, now) {
   if (openPalm) handOpenSeenUntil = now + 950;
   const palmState = openPalm ? 'open' : gesture === 'Closed_Fist' && confidence >= 0.50 ? 'closed' : undefined;
   const palmToggle = updatePalmToggleState(palmState, now);
-  // 挥动时分类器偶尔会短暂丢失“张开手掌”，仍在最近识别到张开的短窗口内追踪其轨迹。
-  const waveEligible = Boolean(landmarks && now <= handOpenSeenUntil);
+  // 只要手部可见即可跟踪挥动轨迹（挥手时“张开手掌”分类常丢帧，不再作为前置条件）。
+  const waveEligible = Boolean(landmarks);
   // 先判挥手（大幅横向/斜向运动）再判开合（原地切换）：
   // 挥手起手时的张手动作不应被误判成暂停 / 继续。
   if (detectPalmWave(landmarks, now, waveEligible)) {
@@ -1429,11 +1624,11 @@ function observeHandGesture(result, now) {
     handGestureCandidate = undefined;
     handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
     setHandGestureStatus(palmState === 'open'
-      ? '已识别张开手掌：横向或斜向挥动可切下一首；原位握拳可暂停 / 继续（需先选中播放卡片）。'
+      ? '已识别张开手掌：食指上指或横向挥动可切下一首；原位握拳可暂停 / 继续（需先选中播放卡片）。'
       : '已识别握拳：原位张开手掌可暂停 / 继续。');
     return;
   }
-  if (!['Thumb_Up', 'Thumb_Down'].includes(gesture) || confidence < 0.72) {
+  if (!['Thumb_Up', 'Thumb_Down', 'Pointing_Up'].includes(gesture) || confidence < 0.72) {
     if (handGestureCandidate && now - handGestureCandidate.lastSeen <= HAND_GESTURE_CANDIDATE_GAP_MS) return;
     handGestureCandidate = undefined;
     return;
@@ -1441,7 +1636,7 @@ function observeHandGesture(result, now) {
   handGestureSuppressHeadUntil = Math.max(handGestureSuppressHeadUntil, now + HAND_GESTURE_HEAD_SUPPRESS_MS);
   if (!handGestureCandidate || handGestureCandidate.gesture !== gesture) {
     handGestureCandidate = { gesture, confidence, since: now, lastSeen: now };
-    const label = gesture === 'Thumb_Up' ? '点赞' : '踩';
+    const label = gesture === 'Thumb_Up' ? '点赞' : gesture === 'Pointing_Up' ? '上指' : '踩';
     setHandGestureStatus(`检测到${label}，请保持片刻确认。`);
     return;
   }
@@ -1731,7 +1926,7 @@ function renderNowPlaying(message) {
   const playlistLabel = activeMode === 'general' ? '通用偏好歌单' : '当前模式偏好歌单';
   const feedbackHint = currentTrack.id === musicFeedbackLockedTrackId
     ? '已记录你喜欢这首歌；播放结束或切到下一首后再询问你的偏好。'
-    : '持续注视歌曲播放卡片约 0.55 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：横向或斜向挥动张开的手掌可直接切下一首，原位开合手掌可暂停 / 继续（开合需先选中播放卡片）。';
+    : '持续注视歌曲播放卡片约 0.55 秒后，系统会询问是否选中；确认后，即使切歌也保持选中，直到说“取消当前歌曲选择”。开启手势后：食指上指或横向挥动张开的手掌可直接切下一首，原位开合手掌可暂停 / 继续（开合需先选中播放卡片）。';
   $('#music-result').innerHTML = `<div class="result-box music-result-box"><article class="music-track-card${musicCardSelected ? ' music-selected' : ''}" data-track-id="${currentTrack.id}"><span>正在播放</span><strong>${currentTrack.title}</strong><small>推荐依据：${currentRecommendationReason || '与当前模式匹配'}</small></article><p>${message}</p><p class="playback-progress" id="playback-progress">正在启动本地演示播放…</p><p class="music-hint">${feedbackHint}</p><button class="secondary" id="toggle-playback">${playbackPaused ? '继续播放' : '暂停播放'}</button><button class="secondary" id="like-track" ${currentTrack.id === musicFeedbackLockedTrackId ? 'disabled' : ''}>我喜欢这首</button><button class="secondary" id="dislike-track">不喜欢这首</button><button class="secondary" id="skip-track">下一首</button><p class="playlist-summary"><strong>${playlistLabel}：</strong>${playlist}</p></div>`;
   $('#toggle-playback').onclick = toggleDemoPlayback;
   $('#like-track').onclick = likeCurrentTrack;
@@ -1920,12 +2115,14 @@ function showSchedule(result) {
   const llmReasons = (result.explanation || [])
     .filter((item) => item.startsWith('本地大模型'))
     .map((item) => `<small class="fusion-note">${escapeHtml(item)}</small>`).join('');
-  const offer = result.reminder_offer;
-  const offerHtml = offer
-    ? (offer.already_set
-        ? `<div class="reminder-offer"><strong>提醒</strong><p>已设置 <b>${escapeHtml(offer.remind_time)}</b> 的「${escapeHtml(offer.title)}」提醒。</p></div>`
-        : `<div class="reminder-offer"><strong>提醒建议</strong><p>需要我在 <b>${escapeHtml(offer.remind_time)}</b> 提醒你参加「${escapeHtml(offer.title)}」吗？${offer.due_now ? '<small>（提醒时间已到，可立即提醒）</small>' : ''}</p><button class="secondary" id="accept-reminder">提醒我</button><button class="secondary" id="decline-reminder">不要</button></div>`)
-    : '';
+  const offers = result.reminder_offers || (result.reminder_offer ? [result.reminder_offer] : []);
+  const offerHtml = offers.map((offer, index) => {
+    if (offer.already_set) {
+      return `<div class="reminder-offer"><strong>提醒</strong><p>已设置 <b>${escapeHtml(offer.remind_time)}</b> 的「${escapeHtml(offer.title)}」提醒。</p></div>`;
+    }
+    const first = index === 0;
+    return `<div class="reminder-offer" data-offer-index="${index}"><strong>提醒建议</strong><p>需要我在 <b>${escapeHtml(offer.remind_time)}</b> 提醒你参加「${escapeHtml(offer.title)}」吗？${offer.due_now ? '<small>（提醒时间已到，可立即提醒）</small>' : ''}</p><button class="secondary" ${first ? 'id="accept-reminder"' : `data-accept="${index}"`}>提醒我</button><button class="secondary" ${first ? 'id="decline-reminder"' : `data-decline="${index}"`}>不要</button></div>`;
+  }).join('');
   $('#memo-result').innerHTML = `<div class="result-box schedule-box"><div class="schedule-summary"><strong>${result.title || '全部日程'}</strong><span>共 ${result.total} 项 · 已完成 ${result.completed} 项 · 已过时间 ${result.past} 项</span></div>${llmMessage}${llmReasons}${fusionNote ? `<small class="fusion-note">${escapeHtml(fusionNote)}</small>` : ''}${offerHtml}${items}</div>`;
   document.querySelectorAll('[data-event-key]').forEach((checkbox) => {
     checkbox.addEventListener('change', async () => {
@@ -1938,9 +2135,10 @@ function showSchedule(result) {
       }
     });
   });
-  if (offer && !offer.already_set) {
-    const accept = $('#accept-reminder');
-    const decline = $('#decline-reminder');
+  offers.forEach((offer, index) => {
+    if (offer.already_set) return;
+    const accept = index === 0 ? $('#accept-reminder') : document.querySelector(`[data-accept="${index}"]`);
+    const decline = index === 0 ? $('#decline-reminder') : document.querySelector(`[data-decline="${index}"]`);
     if (accept) accept.onclick = async () => {
       try {
         const reminderResult = await api('create_reminder', { event_key: offer.event_key });
@@ -1950,12 +2148,13 @@ function showSchedule(result) {
     };
     if (decline) decline.onclick = async () => {
       try {
-        const reminderResult = await api('decline_reminder');
+        const reminderResult = await api('decline_reminder', { event_key: offer.event_key });
         toast(reminderResult.message);
-        showSchedule(await api('query_schedule', { record_history: false }));
+        // 拒绝后该事项的提醒建议立即消失；不改长期偏好，其他事项仍可单独建议。
+        document.querySelectorAll(`[data-offer-index="${index}"]`).forEach((node) => node.remove());
       } catch (error) { toast(error.message); }
     };
-  }
+  });
   void recordScreenContext();
 }
 
@@ -1977,10 +2176,10 @@ function readTextFile(file) {
   });
 }
 
-async function submitScheduleSimulatedSpeech() {
-  const text = $('#schedule-content').value.trim();
+async function submitScheduleSimulatedSpeech(source = 'mic', providedText) {
+  const text = (providedText || '').trim();
   if (!text) {
-    toast('请输入或选择一条日程查询语句。');
+    toast('未识别到语音内容，请重试。');
     return;
   }
   const timestamp = Date.now();
@@ -1988,7 +2187,7 @@ async function submitScheduleSimulatedSpeech() {
     modality: 'speech_text',
     timestamp_ms: timestamp,
     confidence: 1,
-    payload: { text, page: 'memo', source: 'simulated' },
+    payload: { text, page: 'memo', source },
   });
   try {
     const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
@@ -2184,7 +2383,7 @@ async function runSuggestedAction(actionId) {
       toast(names.length ? `常用联系人：${names.join('、')}` : '暂无常用联系人记录。');
       return;
     }
-    if (actionId === 'prepare_message') { $('#message-content')?.focus(); return; }
+    if (actionId === 'prepare_message') { toast('点击「🎤 语音输入」说出要发送的内容。'); return; }
     if (actionId === 'start_focus') { await requestMode('focus'); return; }
     if (actionId === 'resume_music') { await activateGeneralMusic(); return; }
     if (actionId === 'query_schedule') { showSchedule(await api('query_schedule')); return; }
@@ -2246,6 +2445,9 @@ function bindEvents() {
         $('#memo-result').innerHTML = '';
       } else if (result.kind === 'restore_event_completion') {
         showSchedule(await api('query_schedule', { record_history: false }));
+      } else if (result.kind === 'restore_reminder_offer') {
+        // 撤销“不用提醒”：重新给出该事项的提醒建议（日程页可见时刷新）。
+        if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
       }
       await refreshHistory();
     } catch (error) { toast(error.message); }
@@ -2259,7 +2461,6 @@ function bindEvents() {
     } catch (error) { toast(error.message); }
   };
 
-  $('#prepare-message').onclick = submitSimulatedSpeech;
   $('#profile').onchange = async (event) => {
     try {
       const result = await api('select_profile', { profile_id: event.target.value });
@@ -2271,7 +2472,6 @@ function bindEvents() {
       pendingMessage = undefined;
       currentTrack = undefined;
       currentPreferencePlaylist = [];
-      $('#message-content').value = '';
       $('#message-result').innerHTML = '';
       $('#music-result').innerHTML = '';
       $('#memo-result').innerHTML = '';
@@ -2284,19 +2484,9 @@ function bindEvents() {
       toast(error.message);
     }
   };
-  $('#refresh-multimodal-events').onclick = refreshMultimodalInspector;
-  $('#multimodal-inspector').addEventListener('toggle', (event) => {
-    if (event.currentTarget.open) void refreshMultimodalInspector();
-  });
-  document.querySelectorAll('.speech-preset').forEach((node) => node.onclick = () => {
-    $('#message-content').value = node.dataset.text;
-    $('#message-content').focus();
-  });
-  $('#prepare-music-command').onclick = submitSimulatedMusicCommand;
-  document.querySelectorAll('.music-speech-preset').forEach((node) => node.onclick = () => {
-    $('#music-command').value = node.dataset.text;
-    $('#music-command').focus();
-  });
+  document.querySelectorAll('.voice-input').forEach((node) => node.addEventListener('click', () => {
+    void toggleVoiceInput(node.dataset.target);
+  }));
   $('#start-camera').onclick = startCamera;
   $('#calibrate-gaze').onclick = startGazeCalibration;
   $('#clear-gaze-calibration').onclick = clearSavedGazeCalibration;
@@ -2306,11 +2496,6 @@ function bindEvents() {
   $('#choose-memo').onclick = () => openMemoPicker('merge');
   $('#sync-memo').onclick = () => openMemoPicker('merge');
   $('#memo-file').onchange = authorizeSelectedMemos;
-  $('#prepare-schedule').onclick = submitScheduleSimulatedSpeech;
-  document.querySelectorAll('.schedule-speech-preset').forEach((node) => node.onclick = () => {
-    $('#schedule-content').value = node.dataset.text;
-    $('#schedule-content').focus();
-  });
   $('#query-schedule').onclick = async () => {
     try { showSchedule(await api('query_schedule')); }
     catch (error) { toast(error.message); }
@@ -2324,7 +2509,6 @@ function resetMessageForm(message) {
   selectedContactSource = undefined;
   clearGazeSuggestion();
   clearGazeTarget();
-  $('#message-content').value = '';
   $('#message-result').innerHTML = '';
   document.querySelectorAll('.contact').forEach((item) => item.classList.remove('selected'));
   toast(message);

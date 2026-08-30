@@ -15,7 +15,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from llm_reasoner import enhance_local_response, suggest_local_actions
+from llm_reasoner import enhance_local_response, suggest_local_actions, normalize_speech_command
 
 
 ROOT = Path(__file__).resolve().parent
@@ -28,13 +28,13 @@ EVENT_BUFFER_LIMIT = 100
 DEFAULT_PROFILE_ID = "user_xiaoyu"
 # 演示数据统一以 2026-08-23 为基准日期；“今天 / 明天 / 已过时间”全部基于它推算，
 # 不再依赖运行机器的真实日期，保证离线演示与测试样例可复现。
-DEMO_REFERENCE_DATE = "2026-08-23"
+DEMO_REFERENCE_DATE = "2026-08-30"
 LOCAL_LLM_ENABLED = True
 INTERACTION_HISTORY_LIMIT = 200
 UNDO_STACK_LIMIT = 12
 PROFILE_STATE_FIELDS = (
     "focus_mode", "active_mode", "selected_contact", "authorized_sources", "reminders",
-    "completed_events", "track_preferences",
+    "declined_reminder_offers", "completed_events", "track_preferences",
     "mode_preference_playlists", "recommendation_turns", "pending_message",
     "interaction_history", "undo_stack", "gesture_profile",
 )
@@ -69,6 +69,7 @@ def default_state():
         "selected_contact": None,
         "authorized_sources": [],
         "reminders": [],
+        "declined_reminder_offers": [],
         "completed_events": [],
         "track_preferences": {},
         "mode_preference_playlists": {},
@@ -85,7 +86,8 @@ def default_state():
 def profile_runtime_defaults(profile_id=None):
     state = {
         "focus_mode": False, "active_mode": None, "selected_contact": None,
-        "authorized_sources": [], "reminders": [], "completed_events": [],
+        "authorized_sources": [], "reminders": [], "declined_reminder_offers": [],
+        "completed_events": [],
         "track_preferences": {},
         "mode_preference_playlists": {}, "recommendation_turns": {}, "pending_message": None,
         "interaction_history": [], "undo_stack": [],
@@ -173,6 +175,9 @@ def _load_state_from_disk():
     for profile_state in state.get("profile_states", {}).values():
         if isinstance(profile_state, dict):
             profile_state.pop("preference_adjustments", None)
+    state["declined_reminder_offers"] = (
+        state.get("declined_reminder_offers") if isinstance(state.get("declined_reminder_offers"), list) else []
+    )
     state["track_preferences"] = state.get("track_preferences") if isinstance(state.get("track_preferences"), dict) else {}
     state["mode_preference_playlists"] = state.get("mode_preference_playlists") if isinstance(state.get("mode_preference_playlists"), dict) else {}
     state["recommendation_turns"] = state.get("recommendation_turns") if isinstance(state.get("recommendation_turns"), dict) else {}
@@ -355,6 +360,11 @@ def undo_last_nontext_operation(state):
             if not (reminder.get("event_key") == item.get("event_key") and reminder.get("time") == item.get("time"))
         ]
         message = f"已撤销「{item.get('target_id')}」的 {item.get('time')} 提醒。"
+    elif kind == "restore_reminder_offer":
+        # 撤销“不用提醒”：恢复该事项的提醒建议，后续查询会再次给出。
+        declined = state.setdefault("declined_reminder_offers", [])
+        state["declined_reminder_offers"] = [key for key in declined if key != item.get("event_key")]
+        message = "已撤销“不用提醒”，该事项的提醒建议将再次给出。"
     else:
         raise ValueError("该操作已不能安全撤销。")
 
@@ -482,7 +492,7 @@ def record_multimodal_event(event):
     if modality == "speech_text" and not str(payload.get("text", "")).strip():
         raise ValueError("speech_text 事件必须包含非空 text。")
     if modality in {"head_gesture", "hand_gesture"}:
-        if payload.get("page") not in {"message", "music"} or payload.get("decision") not in {"confirm", "reject", "toggle_playback", "skip_track"}:
+        if payload.get("page") not in {"message", "music", "memo"} or payload.get("decision") not in {"confirm", "reject", "toggle_playback", "skip_track"}:
             raise ValueError("视觉手势事件必须包含支持的页面和决策。")
 
     received_at_ms = current_time_ms()
@@ -829,8 +839,20 @@ def understand_multimodal_command(state, speech_timestamp_ms, preferred_contact_
     if not speech_events:
         raise ValueError("未找到对应的模拟语音事件，请重新提交。")
     speech = min(speech_events, key=lambda item: abs(item["timestamp_ms"] - speech_timestamp_ms))
-    intent, _, _ = parse_simulated_speech(str(speech["payload"].get("text", "")))
+    raw_text = str(speech["payload"].get("text", ""))
+    effective_text = raw_text
+    normalized_note = None
+    # 麦克风语音（source=mic）先经本地大模型整理成规范指令，规则再做最终裁决；
+    # 模型不可用/超时/输出不合规时回退原文，保证交互不中断。
+    if speech["payload"].get("source") == "mic" and LOCAL_LLM_ENABLED:
+        normalized = normalize_speech_command(raw_text, speech["payload"].get("page", "unknown"))
+        if normalized and normalized != raw_text:
+            effective_text = normalized
+            normalized_note = f"本地大模型已将语音整理为指令：{normalized}"
+    intent, _, _ = parse_simulated_speech(effective_text)
     result = understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_contact_id, current_track_id)
+    if normalized_note:
+        result.setdefault("explanation", []).append(normalized_note)
     fusion = summarize_multimodal_alignment(events, speech["payload"].get("page", "unknown"), speech_timestamp_ms, intent)
     result["fusion"] = fusion
     result.setdefault("explanation", []).append(f"多模态综合判断：{fusion['summary']}")
@@ -1003,16 +1025,22 @@ def schedule_items(state):
     return sorted(items, key=lambda item: (item.get("date", "9999-99-99"), item.get("time", "99:99")))
 
 
-def build_reminder_offer(state, items):
-    """基于首个未过期的高优先级事项推导提醒建议；无可提醒事项时返回 None。"""
+def build_reminder_offers(state, items, limit=3):
+    """返回最多 limit 个“未过期、未拒绝、未完成”的高优先级事项提醒建议。"""
     profile = next(
         (item for item in read_json(DATA_DIR / "profiles_demo.json") if item["id"] == state.get("active_profile_id")),
         {},
     )
     lead_minutes = int(profile.get("schedule_reminder_minutes") or 50)
     existing = {(reminder.get("event_key"), reminder.get("time")) for reminder in state.get("reminders", [])}
+    declined = set(state.get("declined_reminder_offers", []))
+    offers = []
     for item in sorted(items, key=lambda entry: (entry.get("date", "9999-99-99"), entry.get("time", "99:99"))):
+        if len(offers) >= limit:
+            break
         if item.get("is_past") or item.get("is_completed"):
+            continue
+        if item["event_key"] in declined:
             continue
         if item.get("priority") != "high":
             continue
@@ -1021,7 +1049,7 @@ def build_reminder_offer(state, items):
         except (KeyError, TypeError, ValueError):
             continue
         remind_time = (event_time - timedelta(minutes=lead_minutes)).strftime("%Y-%m-%d %H:%M")
-        return {
+        offers.append({
             "event_key": item["event_key"],
             "memo_id": item.get("id"),
             "title": item.get("title"),
@@ -1030,8 +1058,14 @@ def build_reminder_offer(state, items):
             "lead_minutes": lead_minutes,
             "due_now": event_time - timedelta(minutes=lead_minutes) <= demo_now(),
             "already_set": (item["event_key"], remind_time) in existing,
-        }
-    return None
+        })
+    return offers
+
+
+def build_reminder_offer(state, items):
+    """向后兼容：返回第一个提醒建议；多个建议见 build_reminder_offers。"""
+    offers = build_reminder_offers(state, items, limit=1)
+    return offers[0] if offers else None
 
 
 def schedule_query_result(state, target_date=None, title="全部日程"):
@@ -1048,6 +1082,7 @@ def schedule_query_result(state, target_date=None, title="全部日程"):
         "completed": sum(item["is_completed"] for item in items),
         "past": sum(item["is_past"] for item in items),
         "reminder_offer": build_reminder_offer(state, items),
+        "reminder_offers": build_reminder_offers(state, items, limit=3),
     }
     if target_date:
         result["date"] = target_date
@@ -1243,6 +1278,9 @@ class AssistantHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         # 演示开发阶段始终加载最新页面脚本，避免浏览器缓存旧操作名。
         self.send_header("Cache-Control", "no-store, max-age=0")
+        # 跨源隔离：让浏览器端离线语音识别（onnxruntime-web 线程化 WASM）可用 SharedArrayBuffer。
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         super().end_headers()
 
     def send_json(self, payload, status=HTTPStatus.OK):
@@ -1734,9 +1772,18 @@ class AssistantHandler(SimpleHTTPRequestHandler):
             return {"message": message, "reminders": state["reminders"]}
 
         if action == "decline_reminder":
+            # 记录本次拒绝：同一事项的提醒建议不再重复弹出；该拒绝可撤销。
+            declined = state.setdefault("declined_reminder_offers", [])
+            event_key = str(payload.get("event_key", ""))
+            if event_key and event_key not in declined:
+                declined.append(event_key)
+                push_undo(state, {
+                    "kind": "restore_reminder_offer", "page": "memo",
+                    "event_key": event_key,
+                })
             append_interaction_history(state, page="memo", action="decline_reminder", modality="ui")
             save_state(state)
-            return {"message": "已取消本次提醒；不会因此修改长期偏好。"}
+            return {"message": "已取消本次提醒；不会因此修改长期偏好。", "declined_reminder_offers": declined}
 
         raise ValueError("不支持的操作。")
 

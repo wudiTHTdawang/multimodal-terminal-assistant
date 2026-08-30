@@ -50,6 +50,11 @@ select { margin-left: 8px; padding: 8px; border: 0; border-radius: 8px; color: #
 .contact-gaze-prompt button.primary, .contact-gaze-prompt button.secondary { padding: 6px 10px; margin: 0; border-radius: 7px; font-size: 12px; }
 .contact-gaze-prompt small { display: block; margin-top: 7px; color: #7a879b; font-size: 10px; }
 .music-gaze-prompt { position: fixed; z-index: 25; width: 246px; padding: 10px 11px; border: 1px solid #dbe3f2; border-radius: 10px; color: #43516b; background: #fffffff2; box-shadow: 0 7px 20px #263d931f; font-size: 12px; line-height: 1.45; }
+.schedule-reminder-prompt { position: fixed; z-index: 25; width: 246px; padding: 10px 11px; border: 1px solid #dbe3f2; border-radius: 10px; color: #43516b; background: #fffffff2; box-shadow: 0 7px 20px #263d931f; font-size: 12px; line-height: 1.45; }
+.schedule-reminder-prompt strong { color: #344e9e; font-size: 13px; }
+.schedule-reminder-prompt p { margin: 4px 0 8px; }
+.schedule-reminder-prompt button.primary, .schedule-reminder-prompt button.secondary { padding: 6px 10px; margin: 0 6px 0 0; border-radius: 7px; font-size: 12px; }
+.schedule-reminder-prompt small { display: block; margin-top: 7px; color: #7a879b; font-size: 10px; }
 .music-gaze-prompt strong { color: #344e9e; font-size: 13px; }
 .music-gaze-prompt p { margin: 4px 0 8px; }
 .music-gaze-prompt button.primary, .music-gaze-prompt button.secondary { padding: 6px 10px; margin: 0 6px 0 0; border-radius: 7px; font-size: 12px; }
@@ -77,6 +82,12 @@ textarea { display: block; width: 100%; height: 78px; padding: 11px; margin: 8px
 button.primary, button.secondary { padding: 11px 17px; cursor: pointer; border: 0; border-radius: 9px; font: inherit; font-weight: 700; }
 button.primary { color: #fff; background: #415fc0; }
 button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
+/* 语音输入：独立的醒目样式（绿色），录音时切换为红色脉冲并显示停止提示 */
+.voice-input { margin-right: 8px; padding: 11px 17px; cursor: pointer; border: 0; border-radius: 9px; font: inherit; font-weight: 700; color: #fff; background: linear-gradient(115deg, #2f7a52, #46a06e); box-shadow: 0 4px 12px #2f7a5233; }
+.voice-input:hover { filter: brightness(1.07); }
+.voice-input.recording { background: linear-gradient(115deg, #b23b3b, #d9624f); animation: voice-pulse 1.1s ease-in-out infinite; }
+@keyframes voice-pulse { 0%, 100% { box-shadow: 0 0 0 0 #d9624f77; } 50% { box-shadow: 0 0 0 10px #d9624f00; } }
+.asr-status.recording { color: #b23b3b; font-weight: 700; }
 .result { min-height: 18px; max-width: 760px; margin-top: 21px; color: #263754; line-height: 1.7; }
 .result-box { padding: 17px; margin-top: 10px; border: 1px solid #d7e1f5; border-radius: 12px; background: #fff; }
 .result-box ul { margin-bottom: 0; }
@@ -137,6 +148,8 @@ button.secondary { margin-right: 8px; color: #3a57ad; background: #e5ebfb; }
 .reminder-offer { margin-top: 10px; padding: 10px 12px; border: 1px dashed #e1ad35; border-radius: 10px; background: #fffaf0; display: grid; gap: 8px; }
 .reminder-offer p { margin: 0; font-size: 13px; line-height: 1.55; }
 .reminder-offer small { color: #9a7b2d; }
+.asr-status { margin: 14px 0 0; padding: 9px 10px; border-radius: 8px; color: #5b6b84; background: #eef2fa; font-size: 12px; line-height: 1.5; }
+.voice-only-note { color: #66748a; font-size: 13px; line-height: 1.6; }
 .toast { position: fixed; right: 28px; bottom: 26px; padding: 12px 18px; opacity: 0; transform: translateY(10px); color: #fff; border-radius: 9px; background: #1f315d; transition: .2s; pointer-events: none; }
 .toast.show { opacity: 1; transform: translateY(0); }
 @media (max-width: 920px) {

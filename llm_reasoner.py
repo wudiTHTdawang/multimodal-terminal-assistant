@@ -99,6 +99,35 @@ def enhance_local_response(*, scene, speech_text, rule_result, fusion, profile, 
     return _call_local_model(system, prompt_data)
 
 
+def normalize_speech_command(text, scene=None):
+    """把麦克风语音转写文本整理成规则可解析的规范指令。
+
+    只做“去语气词/压缩/按句式改写”，不得新增人物、消息内容、曲目或操作语义；
+    失败或不合规时返回 None，由 app.py 回退使用原文。最终意图仍由安全规则决定。
+    """
+    canonical = {
+        "message": "给X发消息，内容 / 确认 / 取消",
+        "music": "下一首 / 我喜欢这首 / 这首不喜欢 / 我准备学习 / 播放Lo-fi / 取消当前歌曲选择",
+        "memo": "我今天有什么安排 / 我明天有什么安排 / 后天有什么安排 / 不要提醒",
+    }.get(scene or "message", "给X发消息，内容")
+    prompt_data = {
+        "raw_text": _safe_text(text, 200),
+        "scene": _safe_text(scene, 30),
+        "allowed_examples": canonical,
+    }
+    system = (
+        "你是端侧助手的语音指令整理模块。用户语音转写可能含语气词、重复或口误。"
+        "请把它整理成最接近的一条规范指令，只能按 allowed_examples 的句式改写，"
+        "不得新增人物、消息内容、曲目或操作语义；若无法整理则输出空字符串。"
+        "不输出思考过程、Markdown 或额外文本。只输出紧凑 JSON：{\"r\":\"规范指令，最多40字\"}。"
+    )
+    result = _call_local_model(system, prompt_data, num_predict=24)
+    if not result:
+        return None
+    cleaned = str(result.get("response") or "").strip()
+    return cleaned or None
+
+
 def suggest_local_actions(*, scene, profile, history, allowed_actions, hint_ids=None):
     """页面打开后的异步建议；模型只能在后端白名单中选 ID，前端仍要求用户点击。"""
     allowed_ids = [str(item["id"]) for item in allowed_actions]
