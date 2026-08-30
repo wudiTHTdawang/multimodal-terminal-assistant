@@ -30,18 +30,8 @@ LAYOUT = {
 def main():
     today = date.today()
 
-    # 1) 更新 app.py 的 DEMO_REFERENCE_DATE
-    app_py = ROOT / "app.py"
-    text = app_py.read_text(encoding="utf-8")
-    new_text, count = re.subn(
-        r'DEMO_REFERENCE_DATE = "\d{4}-\d{2}-\d{2}"',
-        f'DEMO_REFERENCE_DATE = "{today.isoformat()}"',
-        text, count=1,
-    )
-    if count != 1:
-        print("ERROR: app.py 未找到 DEMO_REFERENCE_DATE 常量"); sys.exit(1)
-    app_py.write_text(new_text, encoding="utf-8")
-    print(f"[1/3] app.py DEMO_REFERENCE_DATE -> {today.isoformat()}")
+    # 1) 基准日期已由 app.py 动态取服务器启动时的真实日期，无需改写；本脚本只负责
+    #    重新生成演示备忘录的相对日期（昨天过期示例 / 明天 / 后天）。
 
     # 2) memo_demo.json
     memo_path = ROOT / "data" / "memo_demo.json"

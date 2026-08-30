@@ -587,7 +587,6 @@ function clearGazeTarget() {
   gazeCandidateReliabilityUpdatedAt = 0;
   musicGazeGestureWindowUntil = 0;
   musicGestureReadyAt = 0;
-  clearScheduleReminderPrompt();
 }
 
 function clearMusicTrackSelection(message) {
@@ -875,6 +874,11 @@ async function submitSimulatedSpeech(source = 'mic', providedText) {
       resetMessageForm(result.message);
       return;
     }
+    // 未理解/跨页面的指令：仅提示，不覆盖已有的确认框或结果。
+    if (result.ignored || result.intent === 'unknown') {
+      toast(result.message);
+      return;
+    }
     renderMessageUnderstanding(result);
   } catch (error) {
     toast(error.message);
@@ -902,6 +906,11 @@ async function submitSimulatedMusicCommand(source = 'mic', providedText) {
       current_track_id: currentTrack?.id,
     });
     if (fusionSummary(result)) $('#gaze-feedback').textContent = fusionSummary(result);
+    // 未理解/跨页面的指令：仅提示，不覆盖正在播放的卡片。
+    if (result.ignored || result.intent === 'unknown') {
+      toast(result.message);
+      return;
+    }
     if (result.intent === 'cancel_music_selection') {
       clearMusicTrackSelection(result.message);
       toast(result.message);
@@ -1004,58 +1013,11 @@ async function lockGazeTarget(node, zone, confidence) {
     headMotionHistory = [];
     $('#gaze-feedback').textContent = `已确认注视：${label}。请在 3 秒内点头表示喜欢，摇头表示不喜欢并换歌。`;
   } else if (node.classList.contains('schedule-item')) {
-    // 注视锁定日程事项后，询问是否需要为该事件生成提醒（可点头/摇头或用按钮）。
-    const eventKey = node.querySelector('[data-event-key]')?.dataset.eventKey;
-    if (eventKey) showScheduleReminderPrompt(node, eventKey, label);
-    else $('#gaze-feedback').textContent = `已持续注视：${label}。`;
+    $('#gaze-feedback').textContent = `已持续注视：${label}。可在事项右侧点击「⏰ 设置提醒」。`;
   }
   // 操作冷却：同一目标在本次视线操作后的一段时间内不再允许被立即再次锁定。
   gazeActionCooldownKey = metadata.target_id;
   gazeActionCooldownUntil = performance.now() + GAZE_ACTION_COOLDOWN_MS;
-}
-
-// ---- 视线锁定日程事项 → 提醒生成询问 ----
-let pendingScheduleReminder = null;
-// 询问窗口内暂停视线重评：点头/摇头会带动眼部特征，避免被误判为“转移视线”而关掉弹窗。
-let scheduleGazeGestureWindowUntil = 0;
-const SCHEDULE_GAZE_GESTURE_WINDOW_MS = 3200;
-
-function clearScheduleReminderPrompt() {
-  document.querySelector('.schedule-reminder-prompt')?.remove();
-  pendingScheduleReminder = undefined;
-}
-
-function showScheduleReminderPrompt(node, eventKey, label) {
-  if (pendingScheduleReminder) return;
-  const prompt = document.createElement('section');
-  prompt.className = 'schedule-reminder-prompt';
-  prompt.innerHTML = `<strong>需要为「${escapeHtml(label)}」生成提醒吗？</strong><p>将按你的偏好提前提醒。</p><div><button class="primary" id="schedule-prompt-accept">提醒我</button><button class="secondary" id="schedule-prompt-decline">不用</button></div><small>也可点头 / 摇头。</small>`;
-  document.body.append(prompt);
-  positionGazePrompt(prompt, node);
-  pendingScheduleReminder = { node, eventKey };
-  scheduleGazeGestureWindowUntil = performance.now() + SCHEDULE_GAZE_GESTURE_WINDOW_MS;
-  prompt.querySelector('#schedule-prompt-accept').onclick = async () => {
-    const target = pendingScheduleReminder;
-    clearScheduleReminderPrompt();
-    if (!target) return;
-    try {
-      const result = await api('create_reminder', { event_key: target.eventKey });
-      toast(result.message);
-      if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
-      clearGazeTarget(); // 重渲染后释放旧节点锁定，便于冷却结束后再次锁定
-    } catch (error) { toast(error.message); }
-  };
-  prompt.querySelector('#schedule-prompt-decline').onclick = async () => {
-    const target = pendingScheduleReminder;
-    clearScheduleReminderPrompt();
-    if (!target) return;
-    try {
-      const result = await api('decline_reminder', { event_key: target.eventKey });
-      toast(result.message);
-      if (document.querySelector('#memo-result .schedule-box')) showSchedule(await api('query_schedule', { record_history: false }));
-      clearGazeTarget();
-    } catch (error) { toast(error.message); }
-  };
 }
 
 function parseContactSuggestionSpeech(text) {
@@ -1162,8 +1124,6 @@ function updateGazeTarget(prediction) {
   // 已锁定歌曲卡片时，给用户一个短暂且明确的反馈窗口。点头或摇头会明显改变
   // 眼睛、鼻子的相对位置，因此窗口内不再重算注视目标；超时后恢复正常注视判断。
   if (musicGestureWindowOpen) return;
-  // 日程提醒询问窗口同理：点头/摇头回答时暂停视线重评，避免弹窗被误关。
-  if (performance.now() < scheduleGazeGestureWindowUntil) return;
   if (activePage === 'music-page'
     && gazeTargetLocked
     && musicGazeTrackId
@@ -1256,34 +1216,18 @@ function updateGazeTarget(prediction) {
 
 function headGestureHasTarget() {
   // 存在任何一个“是/否”交互时，点头/摇头才生效：联系人/歌曲候选、待确认消息、
-  // 音乐卡片反馈、日程提醒建议、模式切换确认。
+  // 音乐卡片反馈、模式切换确认。
   return Boolean(
     pendingGazeSuggestion
     || pendingMusicGazeSuggestion
     || pendingMessage
     || canAnswerMusicFeedback()
-    || reminderOfferActive()
     || modeDecisionActive()
   );
 }
 
-function reminderOfferActive() {
-  // 视线锁定日程事项后的“是否需要提醒”询问弹窗
-  return Boolean($('#schedule-prompt-accept') && $('#schedule-prompt-accept').isConnected);
-}
-
 function modeDecisionActive() {
   return Boolean($('#decision-switch') && $('#decision-switch').isConnected);
-}
-
-async function acceptReminderOffer(motionStrength) {
-  await recordHeadDecision('confirm', 'reminder_offer', 'memo', motionStrength);
-  $('#schedule-prompt-accept')?.click();
-}
-
-async function declineReminderOffer(motionStrength) {
-  await recordHeadDecision('reject', 'reminder_offer', 'memo', motionStrength);
-  $('#schedule-prompt-decline')?.click();
 }
 
 async function confirmModeSwitch(motionStrength) {
@@ -1366,8 +1310,6 @@ function observeHeadGesture(landmarks) {
       })();
     } else if (pendingMessage) {
       void finishMessageDecision('confirm_send', 'success', 'head', motionStrength);
-    } else if (reminderOfferActive()) {
-      void acceptReminderOffer(motionStrength);
     } else if (modeDecisionActive()) {
       void confirmModeSwitch(motionStrength);
     } else {
@@ -1383,8 +1325,6 @@ function observeHeadGesture(landmarks) {
       dismissMusicGazeSuggestion('好的，暂不选中这首歌。');
     } else if (pendingMessage) {
       void finishMessageDecision('cancel_message', 'cancel', 'head', motionStrength);
-    } else if (reminderOfferActive()) {
-      void declineReminderOffer(motionStrength);
     } else if (modeDecisionActive()) {
       void rejectModeSwitch(motionStrength);
     } else {
@@ -2346,6 +2286,11 @@ async function submitScheduleSimulatedSpeech(source = 'mic', providedText) {
   });
   try {
     const result = await api('understand_multimodal_command', { speech_timestamp_ms: timestamp });
+    // 未理解/跨页面的指令：仅提示，不覆盖已显示的日程。
+    if (result.ignored || result.intent === 'unknown') {
+      toast(result.message);
+      return;
+    }
     if (!result.items) {
       $('#memo-result').innerHTML = `<div class="result-box"><strong>${result.message}</strong></div>`;
       return;

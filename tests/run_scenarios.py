@@ -102,6 +102,8 @@ def run_scenario(scenario):
     app.load_state = lambda: state
     app.save_state = lambda _s: None
     app.LOCAL_LLM_ENABLED = False
+    # 按样例声明的基准日期运行，避免受服务器启动日影响（演示日期随真实日历）。
+    app.DEMO_REFERENCE_DATE = scenario.get("reference_date") or app.DEMO_REFERENCE_DATE
     app.MULTIMODAL_EVENT_BUFFER.clear()
     handler = object.__new__(app.AssistantHandler)
     base_ts = int(time.time() * 1000)

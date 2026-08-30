@@ -26,9 +26,9 @@ AUTHORIZED_DIR = DATA_DIR / "authorized_memos"
 EVENT_TTL_MS = 10_000
 EVENT_BUFFER_LIMIT = 100
 DEFAULT_PROFILE_ID = "user_xiaoyu"
-# 演示数据统一以 2026-08-23 为基准日期；“今天 / 明天 / 已过时间”全部基于它推算，
-# 不再依赖运行机器的真实日期，保证离线演示与测试样例可复现。
-DEMO_REFERENCE_DATE = "2026-08-30"
+# 演示数据基准日期：随服务器启动时的真实日期，“今天/明天/已过时间”据此推算；
+# 可用 scripts/refresh_demo_dates.py 重新生成演示备忘录的相对日期以对齐。
+DEMO_REFERENCE_DATE = datetime.now().strftime("%Y-%m-%d")
 LOCAL_LLM_ENABLED = True
 INTERACTION_HISTORY_LIMIT = 200
 UNDO_STACK_LIMIT = 12
@@ -559,6 +559,16 @@ def parse_simulated_speech(text):
         return "update_reminder_preference", "", ""
     if "修改" in normalized:
         return "request_edit_memo", "", ""
+    # 语音设置/取消提醒：给X设置提醒 / 提醒我X / 取消X提醒
+    match = re.search(r"(?:给|为|帮)([\u4e00-\u9fa5A-Za-z0-9]{1,10})(?:设置|定个|添加)(?:一个)?提醒", normalized)
+    if match:
+        return "set_reminder", match.group(1), ""
+    match = re.search(r"提醒我([\u4e00-\u9fa5A-Za-z0-9]{1,10})", normalized)
+    if match:
+        return "set_reminder", match.group(1), ""
+    match = re.search(r"(?:取消|删除|去掉)([\u4e00-\u9fa5A-Za-z0-9]{1,10})提醒", normalized)
+    if match:
+        return "unset_reminder", match.group(1), ""
     # 日程：优先级与日期查询
     if "优先" in normalized or "重要" in normalized:
         return "query_priority", "", ""
@@ -732,7 +742,8 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
                   "start_focus", "play_music", "offer_start_focus", "stop_mode", "confirm", "cancel"},
         "memo": {"query_schedule_today", "query_schedule_tomorrow", "query_schedule_all",
                  "query_priority", "query_date_plan", "analyze_schedule_pressure",
-                 "decline_reminder", "update_reminder_preference", "request_edit_memo", "confirm", "cancel"},
+                 "decline_reminder", "update_reminder_preference", "request_edit_memo",
+                 "set_reminder", "unset_reminder", "confirm", "cancel"},
     }
     if intent != "unknown" and intent not in page_intents.get(page, set()):
         page_label = {"message": "消息", "music": "音乐", "memo": "日程"}.get(page, page)
@@ -742,6 +753,29 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
             "ignored": True,
             "explanation": ["语音指令与当前页面不匹配，已忽略，未执行任何操作。"],
         }
+    # 日程页语音设置/取消提醒：按事项标题解析并执行（与按钮等价）。
+    if intent in {"set_reminder", "unset_reminder"} and not state["authorized_sources"]:
+        return {
+            "message": "请先授权备忘录文件，再设置提醒。",
+            "intent": intent, "needs_clarification": True,
+            "explanation": ["尚未授权任何备忘录。"],
+        }
+    if intent in {"set_reminder", "unset_reminder"}:
+        candidates = [item for item in schedule_items(state)
+                      if item.get("title") == content or (content and content in item.get("title", ""))]
+        if not candidates:
+            return {
+                "message": f"未找到事项“{content}”，请确认名称后再试。",
+                "intent": intent, "needs_clarification": True,
+                "explanation": ["已授权事项中没有匹配该名称。"],
+            }
+        event_key = candidates[0]["event_key"]
+        if intent == "set_reminder":
+            message, _ = create_reminder_for_event(state, event_key)
+        else:
+            message = remove_reminder_for_event(state, event_key)
+        save_state(state)
+        return {"message": message, "intent": intent, "explanation": [f"已按语音指令处理事项「{candidates[0]['title']}」。"]}
 
     if intent == "cancel_music_selection":
         return {"message": "已取消当前歌曲选择；你可以重新注视并确认另一首歌曲。", "intent": intent, "explanation": [f"识别到音乐取消指令：{speech['payload']['text']}"]}
@@ -789,10 +823,16 @@ def understand_multimodal_command_inner(state, speech_timestamp_ms, preferred_co
         return result
 
     if intent != "send_message":
+        page_hints = {
+            "message": "给他发消息，内容 / 确认 / 取消",
+            "music": "下一首 / 我喜欢这首 / 我准备学习 / 播放Lo-fi / 停止模式",
+            "memo": "我明天有什么安排 / 查看所有日程 / 给组会设置提醒 / 不要提醒",
+        }
+        hint = page_hints.get(page, page_hints["message"])
         return {
-            "message": f"暂未理解“{speech['payload'].get('text', '')}”。可尝试：给他发消息，内容 / 下一首 / 我喜欢这首 / 我明天有什么安排 / 查看所有日程。",
+            "message": f"暂未理解“{speech['payload'].get('text', '')}”。当前页面可尝试：{hint}",
             "intent": "unknown",
-            "explanation": ["未匹配到当前支持的指令，请换一种说法后重试。"],
+            "explanation": ["未匹配到当前页面支持的指令，请换一种说法后重试。"],
         }
     if not content:
         return {"message": "请补充需要发送的消息内容。", "intent": intent, "needs_clarification": True, "explanation": ["识别到发送消息意图，但缺少消息正文。"]}
@@ -1138,6 +1178,52 @@ def build_reminder_offer(state, items):
     """向后兼容：返回第一个提醒建议；多个建议见 build_reminder_offers。"""
     offers = build_reminder_offers(state, items, limit=1)
     return offers[0] if offers else None
+
+
+def create_reminder_for_event(state, event_key):
+    """按事项 event_key 创建提醒（HTTP 动作与语音指令共用）；返回 (message, is_duplicate)。"""
+    items_by_key = {item["event_key"]: item for item in schedule_items(state)}
+    item = items_by_key.get(event_key)
+    if not item:
+        raise ValueError("该日程不在当前已授权文件中。")
+    if item.get("is_past"):
+        raise ValueError("该日程已过时间，无需提醒。")
+    profile = next(
+        (item for item in read_json(DATA_DIR / "profiles_demo.json") if item["id"] == state.get("active_profile_id")),
+        {},
+    )
+    lead_minutes = int(profile.get("schedule_reminder_minutes") or 50)
+    try:
+        event_time = datetime.fromisoformat(f"{item['date']} {item['time']}")
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("该日程时间格式无法识别。")
+    remind_time = (event_time - timedelta(minutes=lead_minutes)).strftime("%Y-%m-%d %H:%M")
+    reminders = state.setdefault("reminders", [])
+    duplicate = any(
+        reminder.get("event_key") == event_key and reminder.get("time") == remind_time
+        for reminder in reminders
+    )
+    if duplicate:
+        return f"已存在 {remind_time} 的「{item['title']}」提醒，未重复创建。", True
+    reminders.append({"memo_id": item.get("id"), "event_key": event_key, "time": remind_time})
+    append_interaction_history(state, page="memo", action="create_reminder", modality="ui", target_id=item.get("title"))
+    push_undo(state, {
+        "kind": "remove_reminder", "page": "memo",
+        "target_id": item.get("title"), "event_key": event_key, "time": remind_time,
+    })
+    return f"已在本项目内创建 {remind_time} 的「{item['title']}」提醒。", False
+
+
+def remove_reminder_for_event(state, event_key):
+    """按事项 event_key 取消提醒（HTTP 动作与语音指令共用）；返回提示信息。"""
+    reminders = state.setdefault("reminders", [])
+    removed = [reminder for reminder in reminders if reminder.get("event_key") == event_key]
+    if not removed:
+        raise ValueError("该事项没有已设置的提醒。")
+    state["reminders"] = [reminder for reminder in reminders if reminder.get("event_key") != event_key]
+    append_interaction_history(state, page="memo", action="remove_reminder", modality="ui")
+    push_undo(state, {"kind": "restore_reminder", "page": "memo", "reminder": removed[0]})
+    return "已取消该事项的提醒。"
 
 
 def schedule_query_result(state, target_date=None, title="全部日程"):
@@ -1814,55 +1900,16 @@ class AssistantHandler(SimpleHTTPRequestHandler):
         if action == "create_reminder":
             # 提醒时间由后端根据事项时间与画像提前量推导，不信任前端传入的时间。
             event_key = str(payload.get("event_key", ""))
-            items_by_key = {item["event_key"]: item for item in schedule_items(state)}
-            item = items_by_key.get(event_key)
-            if not item:
-                raise ValueError("该日程不在当前已授权文件中。")
-            if item.get("is_past"):
-                raise ValueError("该日程已过时间，无需提醒。")
-            profile = next(
-                (item for item in read_json(DATA_DIR / "profiles_demo.json") if item["id"] == state.get("active_profile_id")),
-                {},
-            )
-            lead_minutes = int(profile.get("schedule_reminder_minutes") or 50)
-            try:
-                event_time = datetime.fromisoformat(f"{item['date']} {item['time']}")
-            except (KeyError, TypeError, ValueError):
-                raise ValueError("该日程时间格式无法识别。")
-            remind_time = (event_time - timedelta(minutes=lead_minutes)).strftime("%Y-%m-%d %H:%M")
-            reminders = state.setdefault("reminders", [])
-            duplicate = any(
-                reminder.get("event_key") == event_key and reminder.get("time") == remind_time
-                for reminder in reminders
-            )
-            if duplicate:
-                message = f"已存在 {remind_time} 的「{item['title']}」提醒，未重复创建。"
-            else:
-                reminders.append({"memo_id": item.get("id"), "event_key": event_key, "time": remind_time})
-                append_interaction_history(
-                    state, page="memo", action="create_reminder", modality="ui",
-                    target_id=item.get("title"),
-                )
-                push_undo(state, {
-                    "kind": "remove_reminder", "page": "memo",
-                    "target_id": item.get("title"), "event_key": event_key, "time": remind_time,
-                })
-                message = f"已在本项目内创建 {remind_time} 的「{item['title']}」提醒。"
+            message, _ = create_reminder_for_event(state, event_key)
             save_state(state)
             return {"message": message, "reminders": state["reminders"]}
 
         if action == "remove_reminder":
             # 手动取消某事项的提醒（对应日程项上的“已设置提醒”按钮）。
             event_key = str(payload.get("event_key", ""))
-            reminders = state.setdefault("reminders", [])
-            removed = [reminder for reminder in reminders if reminder.get("event_key") == event_key]
-            if not removed:
-                raise ValueError("该事项没有已设置的提醒。")
-            state["reminders"] = [reminder for reminder in reminders if reminder.get("event_key") != event_key]
-            append_interaction_history(state, page="memo", action="remove_reminder", modality="ui")
-            push_undo(state, {"kind": "restore_reminder", "page": "memo", "reminder": removed[0]})
+            message = remove_reminder_for_event(state, event_key)
             save_state(state)
-            return {"message": "已取消该事项的提醒。", "reminders": state["reminders"]}
+            return {"message": message, "reminders": state["reminders"]}
 
         if action == "decline_reminder":
             # 记录本次拒绝：同一事项的提醒建议不再重复弹出；该拒绝可撤销。

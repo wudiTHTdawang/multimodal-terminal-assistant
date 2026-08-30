@@ -29,14 +29,35 @@ class RegressionTests(unittest.TestCase):
         app.save_state = self.original_save
         app.LOCAL_LLM_ENABLED = self.original_llm
         app.MULTIMODAL_EVENT_BUFFER.clear()
+        tmp = getattr(self, "_memo_tmp_name", None)
+        if tmp:
+            path = app.AUTHORIZED_DIR / tmp
+            if path.exists():
+                path.unlink()
 
-    @staticmethod
-    def state_with_memo():
+    def state_with_memo(self):
+        """按真实“今天”自生成临时备忘录数据，避免依赖提交文件的日期。"""
         state = app.default_state()
         state["active_profile_id"] = "user_xiaoyu"
-        state["authorized_sources"] = [
-            {"display_name": "memo_demo.json", "stored_name": "memo_demo.json", "item_count": 4},
+        today = app.demo_reference_date()
+        entries = [
+            {"id": "memo_000", "date": (today - timedelta(days=1)).isoformat(), "time": "16:00", "duration_minutes": 30,
+             "title": "提交周报", "content": "周报", "location": "会议室", "priority": "high"},
+            {"id": "memo_001", "date": (today + timedelta(days=1)).isoformat(), "time": "10:00", "duration_minutes": 90,
+             "title": "组会", "content": "组会", "location": "实验室 302", "priority": "high"},
+            {"id": "memo_002", "date": (today + timedelta(days=1)).isoformat(), "time": "14:00", "duration_minutes": 30,
+             "title": "提交实验报告", "content": "报告", "location": "线上", "priority": "high"},
+            {"id": "memo_003", "date": (today + timedelta(days=1)).isoformat(), "time": "19:00", "duration_minutes": 60,
+             "title": "健身", "content": "力量训练", "location": "体育馆", "priority": "low"},
+            {"id": "memo_004", "date": (today + timedelta(days=2)).isoformat(), "time": "09:30", "duration_minutes": 60,
+             "title": "论文阅读", "content": "论文", "location": "图书馆", "priority": "medium"},
         ]
+        app.AUTHORIZED_DIR.mkdir(exist_ok=True)
+        self._memo_tmp_name = "test_memo_tmp.json"
+        (app.AUTHORIZED_DIR / self._memo_tmp_name).write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+        state["authorized_sources"] = [{
+            "display_name": "test_memo.json", "stored_name": self._memo_tmp_name, "item_count": len(entries),
+        }]
         return state
 
     # ---------- 演示基准日期 ----------
@@ -98,6 +119,26 @@ class RegressionTests(unittest.TestCase):
         for text, expected in cases.items():
             result = app.parse_simulated_speech(text)
             self.assertEqual(result, expected, text)
+
+    def test_voice_set_and_unset_reminder_by_title(self):
+        state = self.state_with_memo()
+        now = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append({
+            "modality": "speech_text", "timestamp_ms": now, "received_at_ms": now,
+            "confidence": 1.0, "payload": {"page": "memo", "text": "给组会设置提醒", "source": "simulated"},
+        })
+        result = app.understand_multimodal_command(state, now)
+        self.assertEqual(result["intent"], "set_reminder")
+        self.assertIn("已在本项目内创建", result["message"])
+        self.assertEqual(len(state["reminders"]), 1)
+        now2 = int(time.time() * 1000)
+        app.MULTIMODAL_EVENT_BUFFER.append({
+            "modality": "speech_text", "timestamp_ms": now2, "received_at_ms": now2,
+            "confidence": 1.0, "payload": {"page": "memo", "text": "取消组会提醒", "source": "simulated"},
+        })
+        result2 = app.understand_multimodal_command(state, now2)
+        self.assertEqual(result2["intent"], "unset_reminder")
+        self.assertEqual(state["reminders"], [])
 
     def test_demo_now_anchors_past_and_schedule(self):
         reference = app.demo_reference_date()
