@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><style>
+@page { size: A4; margin: 18mm 16mm; }
+body { font-family: "Microsoft YaHei", "SimSun", sans-serif; font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; }
+h1 { font-size: 16pt; border-bottom: 2px solid #2b5ca8; padding-bottom: 6px; color: #1f3a63; }
+h2 { font-size: 13.5pt; color: #2b5ca8; margin-top: 18px; border-left: 4px solid #2b5ca8; padding-left: 8px; }
+h3 { font-size: 11.5pt; color: #333; margin-top: 12px; }
+h4 { font-size: 10.5pt; color: #444; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9.5pt; }
+th, td { border: 1px solid #999; padding: 4px 8px; text-align: left; vertical-align: top; }
+th { background: #eef3fb; }
+pre { background: #f6f8fa; border: 1px solid #ddd; border-radius: 4px; padding: 8px;
+      font-family: Consolas, monospace; font-size: 9pt; white-space: pre-wrap; word-break: break-all; }
+code { font-family: Consolas, monospace; background: #f0f0f0; padding: 1px 3px; border-radius: 3px; font-size: 9pt; }
+blockquote { border-left: 3px solid #bbb; margin: 8px 0; padding: 2px 10px; color: #555; background: #fafafa; }
+li { margin: 2px 0; }
+hr { border: none; border-top: 1px solid #ccc; margin: 10px 0; }
+</style></head><body><h1>多模态个性化终端助手 —— 项目文档</h1>
+<p>版本 1.0　2026.08.31</p>
+<h2>1 项目概况</h2>
+<h3>1.1 背景和基础</h3>
+<p>智能终端交互正从单一文字/语音指令走向语音+视线+手势+环境上下文的组合表达。例如用户一边看向屏幕上的联系人一边说“给他发消息”，系统需要把“他”与注视对象关联起来。端侧部署还要求轻量、实时、隐私闭环（人脸/语音特征不上传）。</p>
+<p>团队基于华为赛题五（智能终端多模态输入感知与识别及个性化应答）开发本系统。已有基础：完整的本地演示原型（Python 标准库后端 + 浏览器端 MediaPipe 视觉 + 本地 Whisper 语音识别），覆盖消息、音乐、日程三个场景，并配备 30 条端到端验收样例与 24 条单元/回归测试。</p>
+<h3>1.2 场景和价值</h3>
+<ul><li><strong>场景</strong>：面向普通 Windows 笔记本/PC 的端侧个人助手，覆盖三类典型交互——注视联系人并发消息、分场景个性化音乐推荐、授权本地备忘录的日程查询与提醒。</li><li><strong>价值</strong>：以“规则基线 + 轻量本地大模型”的可解释架构解决端侧多模态融合的落地问题；隐私敏感数据（人脸、语音、备忘录）全程本机处理，符合隐私合规趋势；无需第三方账号与云服务，断网可用。</li></ul>
+<h3>1.3 所需支持</h3>
+<ul><li>硬件：普通 Windows 笔记本（摄像头、麦克风）；评测机无需 GPU。</li><li>软件：Python 3.12+（仅标准库）、现代浏览器（Chrome/Edge，用于 Web Speech 与 MediaPipe）、Ollama（可选，用于本地大模型解释，<code>qwen2.5:3b-instruct</code>）。</li><li>模型资源：本地 Whisper-tiny 量化模型（约 45MB）、MediaPipe Face/Gesture 模型与 WASM 运行时均随代码包发布。</li></ul>
+<h2>2 项目规划</h2>
+<h3>2.1 整体目标</h3>
+<p>交付一个可在普通 Windows 笔记本上离线运行的多模态个性化终端助手原型：三类意图（发消息、音乐播放、日程查询）理解准确、对象消歧可靠、应答个性化可解释，并满足“原始音视频/备忘录不上传、单轮应答 &lt;5s、断网可用”的约束。以 30 条验收样例全部通过作为可复现的验收基线。</p>
+<h3>2.2 技术创新点</h3>
+<ol><li><strong>可解释的规则基线 + 受限大模型</strong>：意图、对象与执行由确定性安全规则裁决（显式否定优先、低置信度澄清、必须确认），大模型只做冲突解释与个性化润色，且输出不能改变执行结果——兼顾安全与自然语言表达；</li><li><strong>语音指令的页面级约束与近音纠错</strong>：语音指令按当前页面过滤（日程页说“播放下一首”被忽略），识别文本先经本地大模型整理（纠正近音词、剥离“让他/的/一个”等插入语）再交规则，显著降低误触发；</li><li><strong>多模态对象消歧</strong>：语音说出的联系人姓名 &gt; 手动选择 &gt; 视线（含低置信度拦截）&gt; 历史选择，并做屏幕可见性校验；</li><li><strong>端侧全离线链路</strong>：浏览器内 Whisper 语音识别 + MediaPipe 视线/手势 + 本地大模型，人脸/音频/备忘录不出设备；</li><li><strong>日程提醒的交互闭环</strong>：手动/语音/（曾支持）视线三种设置方式，提醒可撤销，日程视图原位刷新不跳转。</li></ol>
+<h2>3 实施方案</h2>
+<h3>3.1 技术可行性分析</h3>
+<ul><li><strong>数据</strong>：演示数据（联系人/曲库/备忘录）为项目内置；语音识别使用公开的 Whisper 模型（Xenova 的 ONNX 转换），未使用私有数据；未训练自定义模型，不涉及人工标注（符合“允许 ≤500 条标注”的约束，本项目采用零标注的规则+提示词方案）。</li><li><strong>行业知识</strong>：交互语义（“发消息”“下一首”“明天安排”等）通过规则模式库与语料库建模，可解释、易扩充。</li><li><strong>算力硬件</strong>：端侧推理为浏览器 MediaPipe/ONNX WASM + 本地 Ollama 3B 模型，普通笔记本即可运行；评测无需 GPU。</li><li><strong>可行性结论</strong>：技术路线成熟、依赖可控、离线可复现，满足赛题端侧部署约束。</li></ul>
+<h3>3.2 技术细节</h3>
+<ul><li><strong>多模态对齐</strong>：统一事件格式 <code>modality + timestamp_ms + confidence + payload</code>；语音事件为锚点，取前后 3 秒内视线、5 秒内屏幕上下文（<code>GAZE_ALIGNMENT_BEFORE_MS=3000</code>），做窗口对齐与对象可见性校验；</li><li><strong>意图理解</strong>：<code>parse_simulated_speech</code> 规则解析（精确匹配→模式→模糊关键词兜底），并按页面白名单过滤；日程支持今天/明天/后天/优先级/压力分析/提醒设置等 12+ 意图；</li><li><strong>冲突与安全</strong>：显式否定词优先于视觉确认；低置信度视线（&lt;0.55）不采用并澄清；消息发送必须确认；LLM 输出不改变意图/对象/执行；</li><li><strong>个性化</strong>：分模式（专注/开车/娱乐）曲目偏好歌单与“每三次穿插大众常听”的探索推荐；页面建议按历史动作映射排序；头部手势幅度自适应阈值；日程提醒按画像提前量（默认 50 分钟）推导；</li><li><strong>语音识别</strong>：优先浏览器 Web Speech（即开即用），不可用时回退本地 Whisper-tiny 量化模型；识别文本进入可编辑确认框，确认后交由大模型整理、规则执行；</li><li><strong>性能指标</strong>：本地大模型单轮 2.8s 超时即回退规则模板；浏览器端事件处理为内存操作；实测 30 条验收样例全部通过（见测试结果报告）。</li></ul>
+<h3>3.3 计划和分工</h3>
+<table><thead><tr><th>阶段</th><th>内容</th><th>时间</th></tr></thead><tbody><tr><td>1</td><td>架构搭建：本地服务 + 三页面原型 + 事件协议</td><td>8 月中旬</td></tr><tr><td>2</td><td>多模态对齐与意图识别（规则基线）</td><td>8 月中下旬</td></tr><tr><td>3</td><td>个性化：音乐偏好、建议面板、提醒链路、手势画像</td><td>8 月下旬</td></tr><tr><td>4</td><td>端侧语音识别（Web Speech + Whisper 回退）与语音整理</td><td>8 月下旬</td></tr><tr><td>5</td><td>验收：30 条样例运行器、单元/回归测试、界面润色</td><td>8 月底</td></tr><tr><td>6</td><td>提交材料：项目文档、视频、可解释性文档、测试报告</td><td>8 月底–9 月初</td></tr></tbody></table>
+<p>团队分工：成员 A 负责前端交互、视线/手势与语音输入；成员 B 负责后端多模态对齐、意图规则、个性化与测试。</p>
+<h2>4 参考资料</h2>
+<ul><li>华为赛题五《智能终端多模态输入感知与识别及个性化应答》（2026 年中国研究生人工智能大赛）</li><li>Hugging Face <code>Xenova/whisper-tiny</code>（Whisper ONNX 转换，MIT/Apache 许可）</li><li>Google MediaPipe Tasks Vision（Face Landmarker / Gesture Recognizer，Apache 2.0）</li><li>@huggingface/transformers（transformers.js，Apache 2.0）</li><li>Qwen2.5（通义千问开源模型，Apache 2.0）</li></ul></body></html>

@@ -1,0 +1,18 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><style>
+@page { size: A4; margin: 18mm 16mm; }
+body { font-family: "Microsoft YaHei", "SimSun", sans-serif; font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; }
+h1 { font-size: 16pt; border-bottom: 2px solid #2b5ca8; padding-bottom: 6px; color: #1f3a63; }
+h2 { font-size: 13.5pt; color: #2b5ca8; margin-top: 18px; border-left: 4px solid #2b5ca8; padding-left: 8px; }
+h3 { font-size: 11.5pt; color: #333; margin-top: 12px; }
+h4 { font-size: 10.5pt; color: #444; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9.5pt; }
+th, td { border: 1px solid #999; padding: 4px 8px; text-align: left; vertical-align: top; }
+th { background: #eef3fb; }
+pre { background: #f6f8fa; border: 1px solid #ddd; border-radius: 4px; padding: 8px;
+      font-family: Consolas, monospace; font-size: 9pt; white-space: pre-wrap; word-break: break-all; }
+code { font-family: Consolas, monospace; background: #f0f0f0; padding: 1px 3px; border-radius: 3px; font-size: 9pt; }
+blockquote { border-left: 3px solid #bbb; margin: 8px 0; padding: 2px 10px; color: #555; background: #fafafa; }
+li { margin: 2px 0; }
+hr { border: none; border-top: 1px solid #ccc; margin: 10px 0; }
+</style></head><body><h1>参赛作品简介（300 字以内）</h1>
+<p>本项目面向智能终端（AI PC / 手机 / 车载助手），构建端侧多模态输入感知与个性化应答系统：融合语音、视线、屏幕上下文与手势，在时间轴上对齐理解用户意图（消息发送、音乐播放、日程查询），以可解释规则基线保证安全，轻量本地大模型（Qwen2.5-3B，低于赛题 14B 上限）负责个性化应答与语音近音纠错。亮点：①“给妈妈发消息”等指代消歧——语音姓名优先、视线辅助、低置信度澄清；②专注/开车/娱乐分场景音乐偏好歌单，支持点头/摇头/手势反馈；③已授权备忘录的日程查询与提醒（可撤销，支持按钮/语音/视线设置）；④完全离线——浏览器端 Whisper 语音识别、MediaPipe 本地视觉，音频视频不上传，隐私端侧闭环。验收：30 条端到端样例全部通过，单轮应答 &lt;3s（大模型超时由规则兜底）。系统运行于普通 Windows 笔记本，无第三方 Python 依赖、断网可用。</p></body></html>
